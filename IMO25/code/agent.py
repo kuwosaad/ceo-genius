@@ -34,259 +34,64 @@ Main entrypoint:
 This file is intentionally comprehensive; the core NRPA utilities are isolated in nrpa.py,
 prompt templates and parsers in prompts.py, and telemetry wrappers in telemetry_ext.py.
 """
+
 import os
 import sys
 import json
-import requests
 import argparse
-import logging
 import time
 import subprocess
 import tempfile
-from datetime import datetime
-from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Tuple
 
-# NRPA additions
-# Support running both as a module (package) and as a script (direct)
+# NRPA additions and prompt imports
 try:
-    # Prefer relative imports when packaged; fallback to direct when run as a script.
-    from .prompts import STRATEGIST_ENUM_PROMPT, WORKER_SKETCH_PROMPT, LIGHTWEIGHT_VERIFIER_PROMPT, STRATEGY_REFINEMENT_PROMPT, parse_strategies_list, parse_viability_score
+    from .prompts import (
+        STRATEGIST_ENUM_PROMPT,
+        WORKER_SKETCH_PROMPT,
+        LIGHTWEIGHT_VERIFIER_PROMPT,
+        STRATEGY_REFINEMENT_PROMPT,
+        parse_strategies_list,
+        parse_viability_score,
+    )
     from .telemetry_ext import nrpa_start, nrpa_iteration, nrpa_end
-    # NRPA is always imported as a module since it's in the same directory
     from .nrpa import run_nrpa, NRPA_LEVELS, NRPA_ITER, NRPA_ALPHA, NRPA_MAX_DEPTH
 except ImportError:
-    from prompts import STRATEGIST_ENUM_PROMPT, WORKER_SKETCH_PROMPT, LIGHTWEIGHT_VERIFIER_PROMPT, STRATEGY_REFINEMENT_PROMPT, parse_strategies_list, parse_viability_score
+    from prompts import (
+        STRATEGIST_ENUM_PROMPT,
+        WORKER_SKETCH_PROMPT,
+        LIGHTWEIGHT_VERIFIER_PROMPT,
+        STRATEGY_REFINEMENT_PROMPT,
+        parse_strategies_list,
+        parse_viability_score,
+    )
     from telemetry_ext import nrpa_start, nrpa_iteration, nrpa_end
-    # NRPA is always imported as a module since it's in the same directory
     from nrpa import run_nrpa, NRPA_LEVELS, NRPA_ITER, NRPA_ALPHA, NRPA_MAX_DEPTH
 
-# Load environment variables from .env file
-load_dotenv()
+from .config import (
+    STRATEGIST_MODEL_NAME,
+    WORKER_MODEL_NAME,
+    IMPROVER_MODEL_NAME,
+    ENABLE_NRPA,
+)
+from .logging_utils import (
+    log_print,
+    debug_print,
+    initialize_logging,
+    set_log_file,
+    close_log_file,
+    set_verbose_mode,
+)
+from .api_utils import (
+    get_api_key,
+    build_request_payload,
+    send_api_request,
+    extract_text_from_response,
+)
+from .strategy_selector import SingleStrategySelector, NRPAStrategySelector
 
-# --- CONFIGURATION ---
-# The models to use for the CEO-Genius framework.
-STRATEGIST_MODEL_NAME = os.getenv("STRATEGIST_MODEL_NAME", "deepseek/deepseek-r1-0528:free")
-WORKER_MODEL_NAME = os.getenv("WORKER_MODEL_NAME", "deepseek/deepseek-chat-v3-0324:free")
-IMPROVER_MODEL_NAME = os.getenv("IMPROVER_MODEL_NAME", "deepseek/deepseek-chat-v3-0324:free")
-
-# Feature flag to enable NRPA strategic search
-ENABLE_NRPA = os.getenv("NRPA_ENABLED", "1") in ("1", "true", "True", "yes", "YES")
-
-
-# Strategy Selector Abstraction
-class StrategySelector:
-    """Abstract base class for strategy selection."""
-    
-    def __init__(self, api_client_funcs):
-        self.api_client_funcs = api_client_funcs
-    
-    def select_strategy(self, problem_statement, other_prompts, telemetry=None):
-        """Select the best strategy for solving the problem."""
-        raise NotImplementedError
-
-
-class SingleStrategySelector(StrategySelector):
-    """Strategy selector that makes a single call to the CEO."""
-    
-    def select_strategy(self, problem_statement, other_prompts, telemetry=None):
-        """Select strategy using a single CEO call."""
-        print("[STRATEGY] Using single strategy selection.")
-        strategist_payload = self.api_client_funcs['build_request_payload'](
-            system_prompt=strategist_system_prompt,
-            question_prompt=problem_statement,
-            other_prompts=other_prompts
-        )
-        strategist_response = self.api_client_funcs['send_api_request'](
-            get_api_key("strategist"), 
-            strategist_payload, 
-            model_name=STRATEGIST_MODEL_NAME, 
-            agent_type="strategist",
-            telemetry=telemetry
-        )
-        return self.api_client_funcs['extract_text_from_response'](strategist_response)
-
-
-class NRPAStrategySelector(StrategySelector):
-    """Strategy selector that runs the full NRPA loop."""
-    
-    def select_strategy(self, problem_statement, other_prompts, telemetry=None):
-        """Select strategy using the full NRPA loop."""
-        print("[NRPA] Starting Strategist with NRPA Strategy Search...")
-        strategies = enumerate_initial_strategies(problem_statement, other_prompts)
-        if not strategies:
-            print("[NRPA] No strategies returned; falling back to original strategist flow.")
-            return self._fallback_strategy(problem_statement, other_prompts, telemetry)
-        
-        # Shared cache for LLM calls
-        cache = {}
-        
-        # Define children provider for NRPA
-        def children_provider(step: int, prefix: Tuple[str, ...]) -> List[str]:
-            if step == 0:
-                return strategies
-            return generate_refinements(list(prefix), problem_statement, cache, telemetry)
-        
-        # Define score function for NRPA
-        def score_fn(seq: List[str]) -> float:
-            if not seq:
-                return 0.0
-            path_description = " -> ".join(seq)
-            sketch = run_strategic_simulation(path_description, problem_statement, telemetry)
-            score, reason = lightweight_score_sketch(sketch, telemetry)
-            print(f"[NRPA] Scored sequence: {path_description[:100]}... -> {score:.3f} ({reason[:50]})")
-            return score
-        
-        # Run NRPA
-        print(f"[NRPA] Starting search: L={NRPA_LEVELS}, N={NRPA_ITER}, Alpha={NRPA_ALPHA}, MaxDepth={NRPA_MAX_DEPTH}")
-        # Log NRPA start
-        if telemetry:
-            nrpa_start(telemetry, {
-                "num_candidates": len(strategies),
-                "levels": NRPA_LEVELS,
-                "iterations": NRPA_ITER,
-                "alpha": NRPA_ALPHA,
-                "max_depth": NRPA_MAX_DEPTH
-            })
-        best_score, best_seq = run_nrpa(
-            levels=NRPA_LEVELS,
-            iterations=NRPA_ITER,
-            alpha=NRPA_ALPHA,
-            initial_strategies=strategies,
-            children_provider=children_provider,
-            score_fn=score_fn,
-            cache=cache
-        )
-        
-        chosen = " -> ".join(best_seq) if best_seq else strategies[0]
-        print(f"[NRPA] Best sequence (score={best_score:.3f}): {chosen}")
-        return chosen
-    
-    def _fallback_strategy(self, problem_statement, other_prompts, telemetry):
-        """Fallback to single strategy when NRPA fails."""
-        strategist_payload = self.api_client_funcs['build_request_payload'](
-            system_prompt=strategist_system_prompt,
-            question_prompt=problem_statement,
-            other_prompts=other_prompts
-        )
-        strategist_response = self.api_client_funcs['send_api_request'](
-            get_api_key("strategist"), 
-            strategist_payload, 
-            model_name=STRATEGIST_MODEL_NAME, 
-            agent_type="strategist",
-            telemetry=telemetry
-        )
-        return self.api_client_funcs['extract_text_from_response'](strategist_response)
-
-# Use the OpenRouter API endpoint
-API_URL_BASE = "https://openrouter.ai/api/v1/chat/completions"
-MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "openrouter").lower()  # "openrouter" | "cerebras"
-CEREBRAS_MODEL_DEFAULT = os.getenv("CEREBRAS_MODEL_DEFAULT", "llama-4-scout-17b-16e-instruct")
-
-# Global variables for logging
-_log_file = None
-_log_directory = "../logs"  # Consolidate all logs to project root
-_log_counter_file = os.path.join(_log_directory, "log_counter.txt")
-_log_number = None  # Cache the log number for this run
-original_print = print
-_verbose_mode = False
-
-def get_timestamp():
-    """Get current timestamp for logging."""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def log_print(*args, **kwargs):
-    """
-    Custom print function that writes to both stdout and log file with timestamps.
-    """
-    # Add timestamp to message
-    timestamp = get_timestamp()
-    message = ' '.join(str(arg) for arg in args)
-    timestamped_message = f"[{timestamp}] {message}"
-    
-    # Print to stdout
-    original_print(timestamped_message, **kwargs)
-    
-    # Also write to log file if specified
-    if _log_file is not None:
-        _log_file.write(timestamped_message + '\n')
-        _log_file.flush()  # Ensure immediate writing
-
-def debug_print(*args, **kwargs):
-    """
-    Debug print function that only prints in verbose mode.
-    """
-    if _verbose_mode:
-        log_print("[DEBUG]", *args, **kwargs)
-
-# Replace the built-in print function
 print = log_print
 
-def get_next_log_number():
-    """Get the next sequential log number and increment the counter."""
-    global _log_counter_file, _log_number
-    
-    # Return cached log number if already assigned for this run
-    if _log_number is not None:
-        return _log_number
-    
-    # Ensure log directory exists
-    log_dir = os.path.dirname(_log_counter_file)
-    os.makedirs(log_dir, exist_ok=True)
-    
-    counter = 1
-    try:
-        if os.path.exists(_log_counter_file):
-            with open(_log_counter_file, 'r') as f:
-                counter = int(f.read().strip())
-    except Exception:
-        counter = 1
-    
-    # Save the next counter value
-    try:
-        with open(_log_counter_file, 'w') as f:
-            f.write(str(counter + 1))
-    except Exception:
-        pass
-    
-    # Cache the log number for this run
-    _log_number = counter
-    return counter
-
-def initialize_logging(log_directory="logs"):
-    """Initialize the logging directory and return a sequentially numbered log file path."""
-    global _log_directory
-    _log_directory = log_directory
-    
-    # Create log directory if it doesn't exist
-    os.makedirs(_log_directory, exist_ok=True)
-    
-    # Get the next sequential log number
-    log_number = get_next_log_number()
-    log_file_path = os.path.join(_log_directory, f"IMO{log_number}.log")
-    
-    return log_file_path
-
-def set_log_file(log_file_path):
-    """Set the log file for output."""
-    global _log_file
-    if log_file_path:
-        try:
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-            _log_file = open(log_file_path, 'w', encoding='utf-8')
-            return True
-        except Exception as e:
-            print(f"Error opening log file {log_file_path}: {e}")
-            return False
-    return True
-
-def close_log_file():
-    """Close the log file if it's open."""
-    global _log_file
-    if _log_file is not None:
-        _log_file.close()
-        _log_file = None
 
 def execute_python_code(code):
     """
@@ -1316,12 +1121,21 @@ def init_explorations(problem_statement, verbose=True, other_prompts=[], backtra
 
     # Select strategy based on NRPA flag
     if ENABLE_NRPA:
-        strategy_selector = NRPAStrategySelector(api_client_funcs)
+        strategy_selector = NRPAStrategySelector(api_client_funcs, STRATEGIST_MODEL_NAME)
     else:
-        strategy_selector = SingleStrategySelector(api_client_funcs)
-    
+        strategy_selector = SingleStrategySelector(api_client_funcs, STRATEGIST_MODEL_NAME)
+
     # Select the best strategy
-    strategy = strategy_selector.select_strategy(problem_statement, other_prompts, telemetry)
+    strategy = strategy_selector.select_strategy(
+        problem_statement,
+        other_prompts,
+        strategist_system_prompt,
+        telemetry=telemetry,
+        enumerate_initial_strategies=enumerate_initial_strategies,
+        generate_refinements=generate_refinements,
+        run_strategic_simulation=run_strategic_simulation,
+        lightweight_score_sketch=lightweight_score_sketch,
+    )
 
     print("[CEO] Strategist's Plan / Chosen Path:")
     print(strategy)
@@ -1632,7 +1446,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Set verbose mode
-    _verbose_mode = args.verbose
+    set_verbose_mode(args.verbose)
     
     max_runs = args.max_runs
     
