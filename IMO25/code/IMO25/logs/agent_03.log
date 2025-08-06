@@ -1,0 +1,2 @@
+[2025-08-05 08:24:41] [MAIN] Logging to file: ./IMO25/logs/agent_03.log
+[2025-08-05 08:24:41] Error: File not found at './IMO25/problems/imo01.txt'
