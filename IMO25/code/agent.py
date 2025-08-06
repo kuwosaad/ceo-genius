@@ -37,256 +37,83 @@ prompt templates and parsers in prompts.py, and telemetry wrappers in telemetry_
 import os
 import sys
 import json
-import requests
 import argparse
-import logging
-import time
 import subprocess
 import tempfile
 from datetime import datetime
-from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Tuple
 
-# NRPA additions
-# Support running both as a module (package) and as a script (direct)
 try:
-    # Prefer relative imports when packaged; fallback to direct when run as a script.
-    from .prompts import STRATEGIST_ENUM_PROMPT, WORKER_SKETCH_PROMPT, LIGHTWEIGHT_VERIFIER_PROMPT, STRATEGY_REFINEMENT_PROMPT, parse_strategies_list, parse_viability_score
+    from .prompts import (
+        STRATEGIST_ENUM_PROMPT,
+        WORKER_SKETCH_PROMPT,
+        LIGHTWEIGHT_VERIFIER_PROMPT,
+        STRATEGY_REFINEMENT_PROMPT,
+        parse_strategies_list,
+        parse_viability_score,
+    )
     from .telemetry_ext import nrpa_start, nrpa_iteration, nrpa_end
-    # NRPA is always imported as a module since it's in the same directory
     from .nrpa import run_nrpa, NRPA_LEVELS, NRPA_ITER, NRPA_ALPHA, NRPA_MAX_DEPTH
+    from .config import (
+        STRATEGIST_MODEL_NAME,
+        WORKER_MODEL_NAME,
+        IMPROVER_MODEL_NAME,
+        ENABLE_NRPA,
+    )
+    from .api_utils import (
+        build_request_payload,
+        send_api_request,
+        extract_text_from_response,
+        get_api_key,
+    )
+    from .logging_utils import (
+        log_print,
+        debug_print,
+        initialize_logging,
+        set_log_file,
+        close_log_file,
+        set_verbose_mode,
+        get_log_directory,
+    )
+    from .strategy_selector import SingleStrategySelector, NRPAStrategySelector
+    from .telemetry_system import TelemetrySystem
 except ImportError:
-    from prompts import STRATEGIST_ENUM_PROMPT, WORKER_SKETCH_PROMPT, LIGHTWEIGHT_VERIFIER_PROMPT, STRATEGY_REFINEMENT_PROMPT, parse_strategies_list, parse_viability_score
+    from prompts import (
+        STRATEGIST_ENUM_PROMPT,
+        WORKER_SKETCH_PROMPT,
+        LIGHTWEIGHT_VERIFIER_PROMPT,
+        STRATEGY_REFINEMENT_PROMPT,
+        parse_strategies_list,
+        parse_viability_score,
+    )
     from telemetry_ext import nrpa_start, nrpa_iteration, nrpa_end
-    # NRPA is always imported as a module since it's in the same directory
     from nrpa import run_nrpa, NRPA_LEVELS, NRPA_ITER, NRPA_ALPHA, NRPA_MAX_DEPTH
+    from config import (
+        STRATEGIST_MODEL_NAME,
+        WORKER_MODEL_NAME,
+        IMPROVER_MODEL_NAME,
+        ENABLE_NRPA,
+    )
+    from api_utils import (
+        build_request_payload,
+        send_api_request,
+        extract_text_from_response,
+        get_api_key,
+    )
+    from logging_utils import (
+        log_print,
+        debug_print,
+        initialize_logging,
+        set_log_file,
+        close_log_file,
+        set_verbose_mode,
+        get_log_directory,
+    )
+    from strategy_selector import SingleStrategySelector, NRPAStrategySelector
+    from telemetry_system import TelemetrySystem
 
-# Load environment variables from .env file
-load_dotenv()
-
-# --- CONFIGURATION ---
-# The models to use for the CEO-Genius framework.
-STRATEGIST_MODEL_NAME = os.getenv("STRATEGIST_MODEL_NAME", "deepseek/deepseek-r1-0528:free")
-WORKER_MODEL_NAME = os.getenv("WORKER_MODEL_NAME", "deepseek/deepseek-chat-v3-0324:free")
-IMPROVER_MODEL_NAME = os.getenv("IMPROVER_MODEL_NAME", "deepseek/deepseek-chat-v3-0324:free")
-
-# Feature flag to enable NRPA strategic search
-ENABLE_NRPA = os.getenv("NRPA_ENABLED", "1") in ("1", "true", "True", "yes", "YES")
-
-
-# Strategy Selector Abstraction
-class StrategySelector:
-    """Abstract base class for strategy selection."""
-    
-    def __init__(self, api_client_funcs):
-        self.api_client_funcs = api_client_funcs
-    
-    def select_strategy(self, problem_statement, other_prompts, telemetry=None):
-        """Select the best strategy for solving the problem."""
-        raise NotImplementedError
-
-
-class SingleStrategySelector(StrategySelector):
-    """Strategy selector that makes a single call to the CEO."""
-    
-    def select_strategy(self, problem_statement, other_prompts, telemetry=None):
-        """Select strategy using a single CEO call."""
-        print("[STRATEGY] Using single strategy selection.")
-        strategist_payload = self.api_client_funcs['build_request_payload'](
-            system_prompt=strategist_system_prompt,
-            question_prompt=problem_statement,
-            other_prompts=other_prompts
-        )
-        strategist_response = self.api_client_funcs['send_api_request'](
-            get_api_key("strategist"), 
-            strategist_payload, 
-            model_name=STRATEGIST_MODEL_NAME, 
-            agent_type="strategist",
-            telemetry=telemetry
-        )
-        return self.api_client_funcs['extract_text_from_response'](strategist_response)
-
-
-class NRPAStrategySelector(StrategySelector):
-    """Strategy selector that runs the full NRPA loop."""
-    
-    def select_strategy(self, problem_statement, other_prompts, telemetry=None):
-        """Select strategy using the full NRPA loop."""
-        print("[NRPA] Starting Strategist with NRPA Strategy Search...")
-        strategies = enumerate_initial_strategies(problem_statement, other_prompts)
-        if not strategies:
-            print("[NRPA] No strategies returned; falling back to original strategist flow.")
-            return self._fallback_strategy(problem_statement, other_prompts, telemetry)
-        
-        # Shared cache for LLM calls
-        cache = {}
-        
-        # Define children provider for NRPA
-        def children_provider(step: int, prefix: Tuple[str, ...]) -> List[str]:
-            if step == 0:
-                return strategies
-            return generate_refinements(list(prefix), problem_statement, cache, telemetry)
-        
-        # Define score function for NRPA
-        def score_fn(seq: List[str]) -> float:
-            if not seq:
-                return 0.0
-            path_description = " -> ".join(seq)
-            sketch = run_strategic_simulation(path_description, problem_statement, telemetry)
-            score, reason = lightweight_score_sketch(sketch, telemetry)
-            print(f"[NRPA] Scored sequence: {path_description[:100]}... -> {score:.3f} ({reason[:50]})")
-            return score
-        
-        # Run NRPA
-        print(f"[NRPA] Starting search: L={NRPA_LEVELS}, N={NRPA_ITER}, Alpha={NRPA_ALPHA}, MaxDepth={NRPA_MAX_DEPTH}")
-        # Log NRPA start
-        if telemetry:
-            nrpa_start(telemetry, {
-                "num_candidates": len(strategies),
-                "levels": NRPA_LEVELS,
-                "iterations": NRPA_ITER,
-                "alpha": NRPA_ALPHA,
-                "max_depth": NRPA_MAX_DEPTH
-            })
-        best_score, best_seq = run_nrpa(
-            levels=NRPA_LEVELS,
-            iterations=NRPA_ITER,
-            alpha=NRPA_ALPHA,
-            initial_strategies=strategies,
-            children_provider=children_provider,
-            score_fn=score_fn,
-            cache=cache
-        )
-        
-        chosen = " -> ".join(best_seq) if best_seq else strategies[0]
-        print(f"[NRPA] Best sequence (score={best_score:.3f}): {chosen}")
-        return chosen
-    
-    def _fallback_strategy(self, problem_statement, other_prompts, telemetry):
-        """Fallback to single strategy when NRPA fails."""
-        strategist_payload = self.api_client_funcs['build_request_payload'](
-            system_prompt=strategist_system_prompt,
-            question_prompt=problem_statement,
-            other_prompts=other_prompts
-        )
-        strategist_response = self.api_client_funcs['send_api_request'](
-            get_api_key("strategist"), 
-            strategist_payload, 
-            model_name=STRATEGIST_MODEL_NAME, 
-            agent_type="strategist",
-            telemetry=telemetry
-        )
-        return self.api_client_funcs['extract_text_from_response'](strategist_response)
-
-# Use the OpenRouter API endpoint
-API_URL_BASE = "https://openrouter.ai/api/v1/chat/completions"
-MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "openrouter").lower()  # "openrouter" | "cerebras"
-CEREBRAS_MODEL_DEFAULT = os.getenv("CEREBRAS_MODEL_DEFAULT", "llama-4-scout-17b-16e-instruct")
-
-# Global variables for logging
-_log_file = None
-_log_directory = "../logs"  # Consolidate all logs to project root
-_log_counter_file = os.path.join(_log_directory, "log_counter.txt")
-_log_number = None  # Cache the log number for this run
-original_print = print
-_verbose_mode = False
-
-def get_timestamp():
-    """Get current timestamp for logging."""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def log_print(*args, **kwargs):
-    """
-    Custom print function that writes to both stdout and log file with timestamps.
-    """
-    # Add timestamp to message
-    timestamp = get_timestamp()
-    message = ' '.join(str(arg) for arg in args)
-    timestamped_message = f"[{timestamp}] {message}"
-    
-    # Print to stdout
-    original_print(timestamped_message, **kwargs)
-    
-    # Also write to log file if specified
-    if _log_file is not None:
-        _log_file.write(timestamped_message + '\n')
-        _log_file.flush()  # Ensure immediate writing
-
-def debug_print(*args, **kwargs):
-    """
-    Debug print function that only prints in verbose mode.
-    """
-    if _verbose_mode:
-        log_print("[DEBUG]", *args, **kwargs)
-
-# Replace the built-in print function
+# Replace built-in print with logging-aware version
 print = log_print
-
-def get_next_log_number():
-    """Get the next sequential log number and increment the counter."""
-    global _log_counter_file, _log_number
-    
-    # Return cached log number if already assigned for this run
-    if _log_number is not None:
-        return _log_number
-    
-    # Ensure log directory exists
-    log_dir = os.path.dirname(_log_counter_file)
-    os.makedirs(log_dir, exist_ok=True)
-    
-    counter = 1
-    try:
-        if os.path.exists(_log_counter_file):
-            with open(_log_counter_file, 'r') as f:
-                counter = int(f.read().strip())
-    except Exception:
-        counter = 1
-    
-    # Save the next counter value
-    try:
-        with open(_log_counter_file, 'w') as f:
-            f.write(str(counter + 1))
-    except Exception:
-        pass
-    
-    # Cache the log number for this run
-    _log_number = counter
-    return counter
-
-def initialize_logging(log_directory="logs"):
-    """Initialize the logging directory and return a sequentially numbered log file path."""
-    global _log_directory
-    _log_directory = log_directory
-    
-    # Create log directory if it doesn't exist
-    os.makedirs(_log_directory, exist_ok=True)
-    
-    # Get the next sequential log number
-    log_number = get_next_log_number()
-    log_file_path = os.path.join(_log_directory, f"IMO{log_number}.log")
-    
-    return log_file_path
-
-def set_log_file(log_file_path):
-    """Set the log file for output."""
-    global _log_file
-    if log_file_path:
-        try:
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-            _log_file = open(log_file_path, 'w', encoding='utf-8')
-            return True
-        except Exception as e:
-            print(f"Error opening log file {log_file_path}: {e}")
-            return False
-    return True
-
-def close_log_file():
-    """Close the log file if it's open."""
-    global _log_file
-    if _log_file is not None:
-        _log_file.close()
-        _log_file = None
 
 def execute_python_code(code):
     """
@@ -383,111 +210,6 @@ def update_scratchpad(scratchpad, new_fact=None, disproven_hypothesis=None, obst
     
     return '\n'.join(lines)
 
-class TelemetrySystem:
-    """
-    Tracks and logs agent performance metrics during execution.
-
-    What is measured:
-    - total_api_calls and api_call_durations: per-request timing to estimate cost/latency
-    - agent_iterations: outer verification-improvement loop cycles
-    - verification_passes / verification_failures: verifier outcomes across iterations
-    - strategy_changes: number of CEO strategy reassessments triggered by repeated failures
-    - solution_found: whether the pipeline converged to a correct solution (stability check)
-
-    The system stores an events list for human-readable milestones (SESSION_START/END,
-    STRATEGY_CHANGE, SOLUTION_FOUND) and also NRPA_* events emitted via telemetry_ext.py.
-    At session end, a metrics JSON snapshot is persisted under logs/ with sequential naming.
-    """
-    def __init__(self, log_directory="../logs"):
-        self.log_directory = log_directory
-        self.metrics = {
-            "start_time": None,
-            "end_time": None,
-            "total_api_calls": 0,
-            "api_call_durations": [],
-            "agent_iterations": 0,
-            "verification_passes": 0,
-            "verification_failures": 0,
-            "strategy_changes": 0,
-            "solution_found": False
-        }
-        self.events = []
-    
-    def start_session(self):
-        """Mark the start of a session."""
-        self.metrics["start_time"] = datetime.now().isoformat()
-        self.log_event("SESSION_START", "Telemetry session started")
-    
-    def end_session(self):
-        """Mark the end of a session."""
-        self.metrics["end_time"] = datetime.now().isoformat()
-        self.log_event("SESSION_END", "Telemetry session ended")
-        self.save_metrics()
-    
-    def log_event(self, event_type, description):
-        """Log a significant event during execution."""
-        self.events.append({
-            "type": event_type,
-            "description": description,
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    def record_api_call(self, duration):
-        """Record an API call with its duration."""
-        self.metrics["total_api_calls"] += 1
-        self.metrics["api_call_durations"].append(duration)
-    
-    def record_iteration(self):
-        """Record an agent iteration."""
-        self.metrics["agent_iterations"] += 1
-    
-    def record_verification_result(self, passed):
-        """Record a verification result."""
-        if passed:
-            self.metrics["verification_passes"] += 1
-        else:
-            self.metrics["verification_failures"] += 1
-    
-    def record_strategy_change(self):
-        """Record a strategy change."""
-        self.metrics["strategy_changes"] += 1
-        self.log_event("STRATEGY_CHANGE", "Agent strategy was reassessed by CEO")
-    
-    def record_solution_found(self):
-        """Record that a solution was found."""
-        self.metrics["solution_found"] = True
-        self.log_event("SOLUTION_FOUND", "Agent found a correct solution")
-    
-    def save_metrics(self):
-        """Save metrics to a JSON file with sequential naming."""
-        # Use the same sequential numbering as the main log
-        log_number = get_next_log_number() - 1  # Use the same number as the main log
-        metrics_file_path = os.path.join(self.log_directory, f"IMO{log_number}_telemetry.json")
-        
-        # Calculate additional metrics
-        total_duration = 0
-        if self.metrics["start_time"] and self.metrics["end_time"]:
-            start = datetime.fromisoformat(self.metrics["start_time"])
-            end = datetime.fromisoformat(self.metrics["end_time"])
-            total_duration = (end - start).total_seconds()
-        
-        avg_api_duration = 0
-        if self.metrics["api_call_durations"]:
-            avg_api_duration = sum(self.metrics["api_call_durations"]) / len(self.metrics["api_call_durations"])
-        
-        # Add calculated metrics
-        full_metrics = {
-            **self.metrics,
-            "total_duration_seconds": total_duration,
-            "average_api_call_duration": avg_api_duration,
-            "events": self.events
-        }
-        
-        try:
-            with open(metrics_file_path, 'w') as f:
-                json.dump(full_metrics, f, indent=2)
-            print(f"[TELEMETRY] Metrics saved to {metrics_file_path}")
-        except Exception as e:
             print(f"[TELEMETRY] Error saving metrics: {e}")
 
 class BacktrackingManager:
@@ -763,53 +485,6 @@ Verification Task Reminder
 Your task is to act as an IMO grader. Now, generate the summary and the step-by-step verification log for the solution above. In your log, justify each correct step and explain in detail any errors or justification gaps you find, as specified in the instructions above.
 """
 
-def get_api_key(agent_type):
-    """
-    Retrieves the appropriate API key from environment variables based on agent type.
-    Exits if the key is not found.
-    """
-    # Provider-specific key
-    if MODEL_PROVIDER == "cerebras":
-        api_key = os.getenv("CEREBRAS_API_KEY")
-        if not api_key:
-            print("Error: CEREBRAS_API_KEY environment variable not set for Cerebras provider.")
-            print("Please check your .env file or set MODEL_PROVIDER=openrouter.")
-            sys.exit(1)
-        return api_key
-
-    # OpenRouter keys by role
-    if agent_type == "strategist":
-        api_key = os.getenv("CEO_API_KEY")
-        if not api_key:
-            print("Error: CEO_API_KEY environment variable not set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-    elif agent_type == "worker":
-        api_key = os.getenv("GENIUS_API_KEY")
-        if not api_key:
-            print("Error: GENIUS_API_KEY environment variable not set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-    elif agent_type == "improver":
-        # Use a separate API key for the improver if available, otherwise fall back to CEO key
-        api_key = os.getenv("IMPROVER_API_KEY")
-        if not api_key:
-            api_key = os.getenv("CEO_API_KEY")
-        if not api_key:
-            print("Error: Neither IMPROVER_API_KEY nor CEO_API_KEY environment variables set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-    else:  # For verifier, use CEO key
-        api_key = os.getenv("CEO_API_KEY")
-        if not api_key:
-            print("Error: CEO_API_KEY environment variable not set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-
 def read_file_content(filepath):
     """
     Reads and returns the content of a file.
@@ -825,211 +500,6 @@ def read_file_content(filepath):
         print(f"Error reading file '{filepath}': {e}")
         sys.exit(1)
 
-def build_request_payload(system_prompt, question_prompt, other_prompts=None, temperature=0.1, top_p=1.0, max_tokens=None):
-    """
-    Builds the JSON payload for the OpenRouter API request.
-    """
-    # Format messages for OpenRouter
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question_prompt}
-    ]
-    
-    if other_prompts:
-        for prompt in other_prompts:
-            messages.append({"role": "user", "content": prompt})
-
-    payload = {
-        "messages": messages,
-        "temperature": temperature,
-        "top_p": top_p
-    }
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
-
-    return payload
-
-def send_openrouter_request(api_key, payload, model_name, agent_type="unknown", max_retries=3, telemetry=None):
-    """
-    Sends the request to the OpenRouter API and returns the response.
-    Includes retry logic for failed requests.
-    If telemetry is provided, records API call duration metrics.
-    """
-    api_url = API_URL_BASE
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/lyang36/IMO25",  # Optional, for OpenRouter analytics
-        "X-Title": f"IMO25-{agent_type}"  # Optional, for OpenRouter analytics
-    }
-    
-    # Add model to payload
-    payload["model"] = model_name
-    
-    for attempt in range(max_retries):
-        print(f"[{agent_type.upper()}] Sending request to OpenRouter API ({model_name})... (Attempt {attempt + 1}/{max_retries})")
-        try:
-            start = time.time()
-            # Use a shorter timeout of 30 seconds for both connection and read
-            response = requests.post(api_url, headers=headers, data=json.dumps(payload), timeout=(30, 30))
-            duration = time.time() - start
-            if telemetry:
-                telemetry.record_api_call(duration)
-            response.raise_for_status()  # Raises an HTTPError for bad responses (4xx or 5xx)
-            
-            # Log successful response (first 500 characters for debugging)
-            response_text = response.text
-            preview = response_text if len(response_text) <= 500 else response_text[:500] + '... [truncated]'
-            print(f"[{agent_type.upper()}] API request succeeded. Status: {response.status_code}")
-            print(f"[{agent_type.upper()}] Response preview: {preview}")
-            
-            # Try to parse JSON and handle potential errors
-            try:
-                # Check if response is empty
-                if not response_text.strip():
-                    print(f"[{agent_type.upper()}] Warning: Empty response received")
-                    return {"choices": [{"message": {"content": ""}}]}
-                
-                # Try to parse JSON
-                response_json = response.json()
-                return response_json
-            except json.JSONDecodeError as e:
-                print(f"[{agent_type.upper()}] JSON decode error: {e}")
-                print(f"[{agent_type.upper()}] Raw response length: {len(response_text)}")
-                # Try to find valid JSON in the response
-                try:
-                    # Look for JSON-like content in the response
-                    import re
-                    json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                    if json_match:
-                        partial_json = json_match.group(0)
-                        print(f"[{agent_type.upper()}] Found potential JSON fragment, length: {len(partial_json)}")
-                        return json.loads(partial_json)
-                    else:
-                        print(f"[{agent_type.upper()}] No JSON-like content found in response")
-                except json.JSONDecodeError:
-                    print(f"[{agent_type.upper()}] Failed to parse JSON fragment")
-                
-                print(f"[{agent_type.upper()}] Raw response (first 1000 chars): {response_text[:1000]}")
-                # Return a default response structure to prevent crashing
-                return {"choices": [{"message": {"content": "Error: Failed to parse API response"}}]}
-        except requests.exceptions.Timeout:
-            duration = time.time() - start if 'start' in locals() else 0
-            if telemetry:
-                telemetry.record_api_call(duration)
-            print(f"[{agent_type.upper()}] API request timed out (Attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                print(f"[{agent_type.upper()}] Retrying in 2 seconds...")
-                time.sleep(2)
-            else:
-                print(f"[{agent_type.upper()}] All retry attempts failed. API request timed out.")
-                return {"choices": [{"message": {"content": "Error: API request timed out"}}]}
-        except requests.exceptions.RequestException as e:
-            duration = time.time() - start if 'start' in locals() else 0
-            if telemetry:
-                telemetry.record_api_call(duration)
-            print(f"[{agent_type.upper()}] Error during API request: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"[{agent_type.upper()}] Status code: {e.response.status_code}")
-                print(f"[{agent_type.upper()}] Response text: {e.response.text}")
-            
-            if attempt < max_retries - 1:
-                print(f"[{agent_type.upper()}] Retrying in 2 seconds...")
-                time.sleep(2)
-            else:
-                print(f"[{agent_type.upper()}] All retry attempts failed. API request failed.")
-                return {"choices": [{"message": {"content": f"Error: API request failed with exception {e}"}}]}
-
-def send_cerebras_request(api_key, payload, model_name, agent_type="unknown", telemetry=None):
-    """
-    Sends a request using Cerebras SDK.
-    Expects: pip install cerebras-cloud-sdk
-    """
-    start = time.time()
-    try:
-        try:
-            from cerebras.cloud.sdk import Cerebras
-        except Exception as import_err:
-            # Return structured error-like response to reuse parser
-            return {"choices": [{"message": {"content": f"Error: cerebras-cloud-sdk not installed ({import_err})"}}]}
-        client = Cerebras(api_key=api_key)
-        # Convert OpenRouter-like payload into Cerebras chat format
-        messages = payload.get("messages", [])
-        # Cerebras expects: client.chat.completions.create(messages=[...], model=model_name, ...)
-        # Map optional params
-        temperature = payload.get("temperature", 0.1)
-        top_p = payload.get("top_p", 1.0)
-        max_tokens = payload.get("max_tokens", None)
-
-        res = client.chat.completions.create(
-            messages=messages,
-            model=model_name or CEREBRAS_MODEL_DEFAULT,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens
-        )
-        duration = time.time() - start
-        if telemetry:
-            telemetry.record_api_call(duration)
-
-        # Normalize to OpenRouter-like response
-        # Cerebras SDK typically returns an object; extract text similarly
-        try:
-            content = res.choices[0].message.content  # SDK structure
-        except Exception:
-            # Fallback: try dict access
-            content = ""
-            try:
-                content = res["choices"][0]["message"]["content"]
-            except Exception:
-                content = str(res)
-        return {"choices": [{"message": {"content": content}}]}
-    except Exception as e:
-        duration = time.time() - start
-        if telemetry:
-            telemetry.record_api_call(duration)
-        return {"choices": [{"message": {"content": f"Error: Cerebras request failed with exception {e}"}}]}
-
-
-def send_api_request(api_key, payload, model_name, agent_type="unknown", max_retries=3, telemetry=None):
-    """
-    Router that dispatches to OpenRouter or Cerebras based on MODEL_PROVIDER env.
-    """
-    provider = MODEL_PROVIDER
-    if provider == "cerebras":
-        # No retries here; SDK handles errors, and we surface them
-        return send_cerebras_request(api_key, payload, model_name, agent_type=agent_type, telemetry=telemetry)
-    # Default to OpenRouter with retries
-    return send_openrouter_request(api_key, payload, model_name, agent_type=agent_type, max_retries=max_retries, telemetry=telemetry)
-
-
-def extract_text_from_response(response_data):
-    """
-    Extracts the generated text from the API response JSON.
-    Handles potential errors if the response format is unexpected.
-    """
-    try:
-        # For OpenRouter, the response format is different
-        if 'choices' in response_data and len(response_data['choices']) > 0:
-            if 'message' in response_data['choices'][0]:
-                if 'content' in response_data['choices'][0]['message']:
-                    return response_data['choices'][0]['message']['content']
-                else:
-                    print("Warning: 'content' field not found in message")
-                    return ""
-            else:
-                print("Warning: 'message' field not found in choices[0]")
-                return ""
-        else:
-            print("Warning: 'choices' field not found or empty in response")
-            return ""
-    except (KeyError, IndexError, TypeError) as e:
-        print("Error: Could not extract text from the API response.")
-        print(f"Reason: {e}")
-        print("Full API Response:")
-        print(json.dumps(response_data, indent=2))
-        # Return empty string instead of raising exception to prevent crashing
-        return ""
 
 def extract_detailed_solution(solution, marker='Detailed Solution', after=True):
     """
@@ -1131,170 +601,6 @@ Response in exactly "yes" or "no". No other words.
     print(o)
     return "yes" in o.lower()
 
-def run_strategic_simulation(path_description: str, problem_statement: str, telemetry=None) -> str:
-    """
-    Short Worker rollout to gauge a strategy's viability.
-
-    Design:
-    - Keep tokens small and temperature low for stability and speed.
-    - Produce a structured sketch (approach, key lemmas, risks) rather than a full proof.
-    - Used only inside the NRPA loop to minimize cost before selecting one path.
-    """
-    """
-    Use the Worker model to perform a short, targeted simulation (proof sketch) for a given strategic path.
-    Constrained by tokens/time via API settings.
-    """
-    print(f"[NRPA] Running strategic simulation for path: {path_description}")
-    worker_prompt = WORKER_SKETCH_PROMPT.format(
-        problem_statement=problem_statement[:4000],  # keep prompt bounded
-        path_description=path_description
-    )
-    payload = build_request_payload(
-        system_prompt="", 
-        question_prompt=worker_prompt,
-        temperature=0.2,
-        top_p=0.95,
-        max_tokens=800  # sketch-sized
-    )
-    resp = send_api_request(get_api_key("worker"), payload, model_name=WORKER_MODEL_NAME, agent_type="worker", telemetry=telemetry)
-    sketch_text = extract_text_from_response(resp)
-    print(f"[NRPA] DEBUG: Generated sketch (first 500 chars): {sketch_text[:500]}")
-    return sketch_text
-
-
-def generate_refinements(path_prefix: List[str], problem_statement: str, cache: Dict[str, Any], telemetry=None) -> List[str]:
-    """
-    Generate refinements for a strategy path prefix using the Strategist model.
-    
-    Args:
-        path_prefix: List of strategy steps so far
-        problem_statement: The IMO problem
-        cache: Shared cache to avoid duplicate LLM calls
-        telemetry: Telemetry system for logging
-        
-    Returns:
-        List of refined strategy steps
-    """
-    from hashlib import md5
-    cache_key = md5(f"refine::{'|'.join(path_prefix)}".encode()).hexdigest()
-    if cache_key in cache:
-        print(f"[NRPA] Using cached refinements for prefix: {' -> '.join(path_prefix[:2])}")
-        return cache[cache_key]
-        
-    prefix_text = " -> ".join(path_prefix) if path_prefix else "(initial strategies)"
-    print(f"[NRPA] Generating refinements for prefix: {prefix_text}")
-    
-    prompt = STRATEGY_REFINEMENT_PROMPT.format(path_prefix=prefix_text)
-    payload = build_request_payload(
-        system_prompt="", 
-        question_prompt=prompt,
-        temperature=0.3,
-        top_p=0.9,
-        max_tokens=600
-    )
-    resp = send_api_request(get_api_key("strategist"), payload, model_name=STRATEGIST_MODEL_NAME, agent_type="strategist", telemetry=telemetry)
-    text = extract_text_from_response(resp)
-    
-    # Parse refinements (expecting JSON array)
-    refinements = parse_strategies_list(text)
-    # Deduplicate and limit
-    seen = set()
-    unique = []
-    for r in refinements:
-        if r not in seen and len(r) > 10 and len(r) < 200:
-            seen.add(r)
-            unique.append(r)
-    result = unique[:5]
-    cache[cache_key] = result
-    print(f"[NRPA] Generated {len(result)} refinements")
-    return result
-
-
-def lightweight_score_sketch(sketch: str, telemetry=None):
-    """
-    Score a high-level sketch on [0.0, 1.0] using a lightweight verifier prompt.
-
-    Robustness:
-    - Attempts strict JSON parsing first, falls back to JSON fragment detection,
-      then numeric heuristic to avoid exceptions from imperfect LLM outputs.
-    - Always returns (score, reason) with safe defaults to keep the NRPA loop progressing.
-    - Guards against empty/malformed API responses to prevent KeyError/TypeError crashes.
-    - Adds extra debugging for failed parses to help diagnose model output issues.
-    """
-    # Use replace instead of format to avoid issues with curly braces in the sketch
-    prompt = LIGHTWEIGHT_VERIFIER_PROMPT.replace('{sketch}', sketch)
-    payload = build_request_payload(system_prompt="", question_prompt=prompt, temperature=0.0, top_p=1.0, max_tokens=200)
-    resp = send_api_request(get_api_key("verifier"), payload, model_name=IMPROVER_MODEL_NAME, agent_type="verifier", telemetry=telemetry)
-
-    # Ensure we have text content; if not, default safely
-    text = ""
-    try:
-        text = extract_text_from_response(resp)
-    except Exception as e:
-        text = f"(no-text; extract error: {e})"
-
-    # Debug: Print the actual response we're trying to parse
-    print(f"[NRPA] DEBUG: Verifier response text: {text[:500]}")
-    
-    # Parse defensively
-    score = 0.0
-    reason = ""
-    parsed_score = None
-    parsed_reason = None
-    
-    try:
-        print(f"[NRPA] DEBUG: Attempting to parse viability score from text: {text[:200]}")
-        parsed_score, parsed_reason = parse_viability_score(text or "")
-        print(f"[NRPA] DEBUG: parse_viability_score returned: score={parsed_score}, reason={parsed_reason}")
-        # Normalize parsed values
-        try:
-            score = float(parsed_score)
-        except Exception as e:
-            print(f"[NRPA] DEBUG: Failed to convert parsed_score to float: {parsed_score}, error: {e}")
-            score = 0.0
-        if score < 0.0 or score > 1.0:
-            print(f"[NRPA] DEBUG: Score out of range [0,1]: {score}")
-            score = 0.0
-        reason = (parsed_reason or "").strip()
-    except Exception as e:
-        print(f"[NRPA] DEBUG: Exception in parse_viability_score: {e}")
-        score = 0.0
-        reason = f"parse error: {e}"
-
-    # Fallback reason from raw text if needed
-    if not reason:
-        snippet = (text or "").strip()
-        if len(snippet) > 160:
-            snippet = snippet[:160] + "..."
-        reason = snippet or "no reason"
-
-    # Debug output for failed parses
-    if score == 0.0 and "parse error" in reason:
-        print(f"[NRPA] DEBUG: Failed to parse viability score from verifier response:")
-        print(f"[NRPA] DEBUG: Full response text: {text}")
-        print(f"[NRPA] DEBUG: Parsed score: {parsed_score}, reason: {parsed_reason}")
-
-    print(f"[NRPA] Lightweight score: {score:.3f}. Reason: {reason}")
-    return score, reason
-
-
-def enumerate_initial_strategies(problem_statement: str, other_prompts):
-    """
-    Ask the Strategist to list 3–5 distinct high-level paths (one-liners with labels).
-    The parser in prompts.py tolerates minor formatting deviations to keep the system robust.
-    """
-    """
-    Ask the Strategist model to enumerate 3–5 high-level strategy candidates.
-    """
-    enum_prompt = STRATEGIST_ENUM_PROMPT.format(problem_statement=problem_statement)
-    payload = build_request_payload(system_prompt=strategist_system_prompt, question_prompt=enum_prompt, other_prompts=other_prompts, temperature=0.2, top_p=0.9, max_tokens=600)
-    resp = send_api_request(get_api_key("strategist"), payload, model_name=STRATEGIST_MODEL_NAME, agent_type="strategist")
-    text = extract_text_from_response(resp)
-    strategies = parse_strategies_list(text)
-    print("[NRPA] Initial strategies:")
-    for s in strategies:
-        print(f" - {s}")
-    return strategies
 
 
 def init_explorations(problem_statement, verbose=True, other_prompts=[], backtracker=None, telemetry=None):
@@ -1311,14 +617,13 @@ def init_explorations(problem_statement, verbose=True, other_prompts=[], backtra
         'build_request_payload': build_request_payload,
         'send_api_request': send_api_request,
         'extract_text_from_response': extract_text_from_response,
-        'get_api_key': get_api_key
     }
 
     # Select strategy based on NRPA flag
     if ENABLE_NRPA:
-        strategy_selector = NRPAStrategySelector(api_client_funcs)
+        strategy_selector = NRPAStrategySelector(api_client_funcs, strategist_system_prompt)
     else:
-        strategy_selector = SingleStrategySelector(api_client_funcs)
+        strategy_selector = SingleStrategySelector(api_client_funcs, strategist_system_prompt)
     
     # Select the best strategy
     strategy = strategy_selector.select_strategy(problem_statement, other_prompts, telemetry)
@@ -1406,7 +711,7 @@ def agent(problem_statement, other_prompts=[]):
       - Emits final solution when stability threshold is met
     """
     # Initialize telemetry system
-    telemetry = TelemetrySystem(_log_directory)
+    telemetry = TelemetrySystem(get_log_directory())
     telemetry.start_session()
     
     # Initialize the shared memory scratchpad
@@ -1628,11 +933,11 @@ if __name__ == "__main__":
     parser.add_argument('--other_prompts', '-o', type=str, help='Other prompts (optional)')
     parser.add_argument("--max_runs", '-m', type=int, default=10, help='Maximum number of runs (default: 10)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose mode for debugging')
-    
+
     args = parser.parse_args()
-    
-    # Set verbose mode
-    _verbose_mode = args.verbose
+
+    # Set verbose mode via logging utilities
+    set_verbose_mode(args.verbose)
     
     max_runs = args.max_runs
     
