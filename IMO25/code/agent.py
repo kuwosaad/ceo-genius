@@ -47,6 +47,31 @@ from datetime import datetime
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Tuple
 
+try:
+    from .logging_utils import (
+        log_print,
+        debug_print,
+        initialize_logging,
+        set_log_file,
+        close_log_file,
+        set_verbose_mode,
+        get_log_directory,
+    )
+    from .scratchpad import initialize_scratchpad, update_scratchpad
+    from .telemetry import TelemetrySystem, BacktrackingManager
+except ImportError:
+    from logging_utils import (
+        log_print,
+        debug_print,
+        initialize_logging,
+        set_log_file,
+        close_log_file,
+        set_verbose_mode,
+        get_log_directory,
+    )
+    from scratchpad import initialize_scratchpad, update_scratchpad
+    from telemetry import TelemetrySystem, BacktrackingManager
+
 # NRPA additions
 # Support running both as a module (package) and as a script (direct)
 try:
@@ -183,110 +208,8 @@ API_URL_BASE = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "openrouter").lower()  # "openrouter" | "cerebras"
 CEREBRAS_MODEL_DEFAULT = os.getenv("CEREBRAS_MODEL_DEFAULT", "llama-4-scout-17b-16e-instruct")
 
-# Global variables for logging
-_log_file = None
-_log_directory = "../logs"  # Consolidate all logs to project root
-_log_counter_file = os.path.join(_log_directory, "log_counter.txt")
-_log_number = None  # Cache the log number for this run
-original_print = print
-_verbose_mode = False
-
-def get_timestamp():
-    """Get current timestamp for logging."""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def log_print(*args, **kwargs):
-    """
-    Custom print function that writes to both stdout and log file with timestamps.
-    """
-    # Add timestamp to message
-    timestamp = get_timestamp()
-    message = ' '.join(str(arg) for arg in args)
-    timestamped_message = f"[{timestamp}] {message}"
-    
-    # Print to stdout
-    original_print(timestamped_message, **kwargs)
-    
-    # Also write to log file if specified
-    if _log_file is not None:
-        _log_file.write(timestamped_message + '\n')
-        _log_file.flush()  # Ensure immediate writing
-
-def debug_print(*args, **kwargs):
-    """
-    Debug print function that only prints in verbose mode.
-    """
-    if _verbose_mode:
-        log_print("[DEBUG]", *args, **kwargs)
-
 # Replace the built-in print function
 print = log_print
-
-def get_next_log_number():
-    """Get the next sequential log number and increment the counter."""
-    global _log_counter_file, _log_number
-    
-    # Return cached log number if already assigned for this run
-    if _log_number is not None:
-        return _log_number
-    
-    # Ensure log directory exists
-    log_dir = os.path.dirname(_log_counter_file)
-    os.makedirs(log_dir, exist_ok=True)
-    
-    counter = 1
-    try:
-        if os.path.exists(_log_counter_file):
-            with open(_log_counter_file, 'r') as f:
-                counter = int(f.read().strip())
-    except Exception:
-        counter = 1
-    
-    # Save the next counter value
-    try:
-        with open(_log_counter_file, 'w') as f:
-            f.write(str(counter + 1))
-    except Exception:
-        pass
-    
-    # Cache the log number for this run
-    _log_number = counter
-    return counter
-
-def initialize_logging(log_directory="logs"):
-    """Initialize the logging directory and return a sequentially numbered log file path."""
-    global _log_directory
-    _log_directory = log_directory
-    
-    # Create log directory if it doesn't exist
-    os.makedirs(_log_directory, exist_ok=True)
-    
-    # Get the next sequential log number
-    log_number = get_next_log_number()
-    log_file_path = os.path.join(_log_directory, f"IMO{log_number}.log")
-    
-    return log_file_path
-
-def set_log_file(log_file_path):
-    """Set the log file for output."""
-    global _log_file
-    if log_file_path:
-        try:
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-            _log_file = open(log_file_path, 'w', encoding='utf-8')
-            return True
-        except Exception as e:
-            print(f"Error opening log file {log_file_path}: {e}")
-            return False
-    return True
-
-def close_log_file():
-    """Close the log file if it's open."""
-    global _log_file
-    if _log_file is not None:
-        _log_file.close()
-        _log_file = None
 
 def execute_python_code(code):
     """
@@ -322,232 +245,6 @@ def execute_python_code(code):
         return {"success": False, "output": "", "error": "Code execution timed out"}
     except Exception as e:
         return {"success": False, "output": "", "error": str(e)}
-
-def initialize_scratchpad(problem_statement):
-    """
-    Initialize the shared memory scratchpad with problem information.
-    """
-    # Extract key information from the problem statement
-    # This is a simplified version - in practice, we might want to use an LLM to parse this
-    scratchpad = f"""--- WORKING THEORY SCRATCHPAD ---
-**Problem Statement:** {problem_statement[:200]}... (truncated)
-
-**Key Definitions:**
-- S: Set of points (a,b) where a,b are positive integers and a+b ≤ n+1
-- T_n: Total number of points in S = n(n+1)/2
-- Sunny line: Line not parallel to x-axis, y-axis, or x+y=0
-
-**Proven Facts:**
-- None yet established
-
-**Disproven Hypotheses:**
-- None yet disproven
-
-**Current Central Obstacle:**
-- Need to determine all possible values of k for given n
-
---- END SCRATCHPAD ---"""
-    return scratchpad
-
-def update_scratchpad(scratchpad, new_fact=None, disproven_hypothesis=None, obstacle=None):
-    """
-    Update the scratchpad with new information.
-    """
-    lines = scratchpad.split('\n')
-    
-    # Find sections
-    proven_section = -1
-    disproven_section = -1
-    obstacle_section = -1
-    
-    for i, line in enumerate(lines):
-        if line.startswith('**Proven Facts:**'):
-            proven_section = i
-        elif line.startswith('**Disproven Hypotheses:**'):
-            disproven_section = i
-        elif line.startswith('**Current Central Obstacle:**'):
-            obstacle_section = i
-    
-    # Update sections
-    if new_fact and proven_section != -1:
-        # Insert after the "Proven Facts:" line
-        lines.insert(proven_section + 1, f"- {new_fact}")
-    
-    if disproven_hypothesis and disproven_section != -1:
-        # Insert after the "Disproven Hypotheses:" line
-        lines.insert(disproven_section + 1, f"- {disproven_hypothesis}")
-    
-    if obstacle and obstacle_section != -1:
-        # Replace the obstacle line
-        lines[obstacle_section] = f"**Current Central Obstacle:** {obstacle}"
-    
-    return '\n'.join(lines)
-
-class TelemetrySystem:
-    """
-    Tracks and logs agent performance metrics during execution.
-
-    What is measured:
-    - total_api_calls and api_call_durations: per-request timing to estimate cost/latency
-    - agent_iterations: outer verification-improvement loop cycles
-    - verification_passes / verification_failures: verifier outcomes across iterations
-    - strategy_changes: number of CEO strategy reassessments triggered by repeated failures
-    - solution_found: whether the pipeline converged to a correct solution (stability check)
-
-    The system stores an events list for human-readable milestones (SESSION_START/END,
-    STRATEGY_CHANGE, SOLUTION_FOUND) and also NRPA_* events emitted via telemetry_ext.py.
-    At session end, a metrics JSON snapshot is persisted under logs/ with sequential naming.
-    """
-    def __init__(self, log_directory="../logs"):
-        self.log_directory = log_directory
-        self.metrics = {
-            "start_time": None,
-            "end_time": None,
-            "total_api_calls": 0,
-            "api_call_durations": [],
-            "agent_iterations": 0,
-            "verification_passes": 0,
-            "verification_failures": 0,
-            "strategy_changes": 0,
-            "solution_found": False
-        }
-        self.events = []
-    
-    def start_session(self):
-        """Mark the start of a session."""
-        self.metrics["start_time"] = datetime.now().isoformat()
-        self.log_event("SESSION_START", "Telemetry session started")
-    
-    def end_session(self):
-        """Mark the end of a session."""
-        self.metrics["end_time"] = datetime.now().isoformat()
-        self.log_event("SESSION_END", "Telemetry session ended")
-        self.save_metrics()
-    
-    def log_event(self, event_type, description):
-        """Log a significant event during execution."""
-        self.events.append({
-            "type": event_type,
-            "description": description,
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    def record_api_call(self, duration):
-        """Record an API call with its duration."""
-        self.metrics["total_api_calls"] += 1
-        self.metrics["api_call_durations"].append(duration)
-    
-    def record_iteration(self):
-        """Record an agent iteration."""
-        self.metrics["agent_iterations"] += 1
-    
-    def record_verification_result(self, passed):
-        """Record a verification result."""
-        if passed:
-            self.metrics["verification_passes"] += 1
-        else:
-            self.metrics["verification_failures"] += 1
-    
-    def record_strategy_change(self):
-        """Record a strategy change."""
-        self.metrics["strategy_changes"] += 1
-        self.log_event("STRATEGY_CHANGE", "Agent strategy was reassessed by CEO")
-    
-    def record_solution_found(self):
-        """Record that a solution was found."""
-        self.metrics["solution_found"] = True
-        self.log_event("SOLUTION_FOUND", "Agent found a correct solution")
-    
-    def save_metrics(self):
-        """Save metrics to a JSON file with sequential naming."""
-        # Use the same sequential numbering as the main log
-        log_number = get_next_log_number() - 1  # Use the same number as the main log
-        metrics_file_path = os.path.join(self.log_directory, f"IMO{log_number}_telemetry.json")
-        
-        # Calculate additional metrics
-        total_duration = 0
-        if self.metrics["start_time"] and self.metrics["end_time"]:
-            start = datetime.fromisoformat(self.metrics["start_time"])
-            end = datetime.fromisoformat(self.metrics["end_time"])
-            total_duration = (end - start).total_seconds()
-        
-        avg_api_duration = 0
-        if self.metrics["api_call_durations"]:
-            avg_api_duration = sum(self.metrics["api_call_durations"]) / len(self.metrics["api_call_durations"])
-        
-        # Add calculated metrics
-        full_metrics = {
-            **self.metrics,
-            "total_duration_seconds": total_duration,
-            "average_api_call_duration": avg_api_duration,
-            "events": self.events
-        }
-        
-        try:
-            with open(metrics_file_path, 'w') as f:
-                json.dump(full_metrics, f, indent=2)
-            print(f"[TELEMETRY] Metrics saved to {metrics_file_path}")
-        except Exception as e:
-            print(f"[TELEMETRY] Error saving metrics: {e}")
-
-class BacktrackingManager:
-    """
-    Manages strategic backtracking when repeated verification failures occur.
-
-    Behavior:
-    - Increments a failure counter on each failed verification
-    - Once a threshold is reached (default: 3), escalates to request a new strategy
-      from the CEO/Strategist with a failure summary and history for context.
-    - Resets when a new strategy is adopted to avoid premature further escalation.
-    """
-    def __init__(self, max_failures=3):
-        self.failure_count = 0
-        self.max_failures = max_failures
-        self.failure_history = []
-    
-    def record_failure(self, error_type, context, scratchpad_state):
-        """
-        Record a failure and return whether escalation to CEO is needed.
-        """
-        self.failure_count += 1
-        self.failure_history.append({
-            "type": error_type,
-            "context": context,
-            "scratchpad_state": scratchpad_state,
-            "timestamp": datetime.now().isoformat()
-        })
-        return self.failure_count >= self.max_failures
-    
-    def generate_ceo_reassessment_prompt(self, original_strategy, problem_statement):
-        """
-        Generate a prompt for the CEO to reassess the strategy.
-        """
-        recent_failures = self.failure_history[-3:]  # Last 3 failures
-        failure_summary = "\n".join([
-            f"- {f['type']}: {f['context'][:100]}..." for f in recent_failures
-        ])
-        
-        return f"""
-STRATEGIC REASSESSMENT REQUEST
-
-The current strategy has failed {self.failure_count} times. 
-Please reassess and provide a new approach.
-
-Original Problem:
-{problem_statement}
-
-Original Strategy:
-{original_strategy}
-
-Recent Failures:
-{failure_summary}
-
-Failure History:
-{json.dumps(self.failure_history, indent=2)}
-
-Please provide a new strategic plan that addresses these failures.
-"""
-
 strategist_system_prompt = """
 You are a world-class mathematician and a brilliant strategist. Your role is to act as the "CEO" or "Strategist" in a two-agent team tasked with solving an International Mathematical Olympiad (IMO) problem.
 
@@ -1406,7 +1103,7 @@ def agent(problem_statement, other_prompts=[]):
       - Emits final solution when stability threshold is met
     """
     # Initialize telemetry system
-    telemetry = TelemetrySystem(_log_directory)
+    telemetry = TelemetrySystem(get_log_directory())
     telemetry.start_session()
     
     # Initialize the shared memory scratchpad
@@ -1632,7 +1329,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Set verbose mode
-    _verbose_mode = args.verbose
+    set_verbose_mode(args.verbose)
     
     max_runs = args.max_runs
     
