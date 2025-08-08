@@ -1,3 +1,4 @@
+
 # IMO25 — CEO–Genius Multi‑Agent Solver with NRPA Strategy Search
 
 Research‑grade framework orchestrating multiple LLM "roles" to solve International Mathematical Olympiad (IMO) problems, enhanced with Nested Rollout Policy Adaptation (NRPA) for intelligent strategy exploration and learning.
@@ -66,6 +67,22 @@ Environment variables (.env or shell):
 - CEREBRAS_MODEL_DEFAULT: default Cerebras model id
 - NRPA_ENABLED: "1"/"true" to enable NRPA strategy search, "0"/"false" to disable
 
+Advanced NRPA configuration (optional; defaults preserve existing behavior):
+
+- NRPA_LEVELS: nesting depth (default from code)
+- NRPA_ITER: iterations per level (default from code)
+- NRPA_ALPHA: adaptation step size (default from code)
+- NRPA_MAX_DEPTH: maximum sequence depth (default from code)
+- NRPA_TEMPERATURE: softmax temperature for policy sampling (default 1.0)
+- NRPA_SEED: integer seed for reproducibility (optional)
+- NRPA_PATIENCE: early stopping plateau (0 disables; default 0)
+- NRPA_MAX_SECONDS: wall-clock budget in seconds (optional)
+- NRPA_MAX_CALLS: combined budget for refinement + scoring calls (optional)
+- NRPA_BEAM_WIDTH: base-level independent rollouts per iteration (default 1)
+- NRPA_MAX_WORKERS: max threads for scoring beam (default 1)
+- NRPA_CACHE_ENABLED: enable disk-backed cache for refinements/scores (default on)
+- NRPA_CACHE_DIR: directory for cache files (default `IMO25/cache`)
+
 Dependencies:
 ```bash
 pip install requests python-dotenv
@@ -100,6 +117,14 @@ Provider selection:
 export MODEL_PROVIDER=openrouter
 # or
 export MODEL_PROVIDER=cerebras
+# or
+export MODEL_PROVIDER=gemini
+# When using Gemini, set your API key and model names, e.g.:
+export GEMINI_API_KEY=your_key_here
+# Example models: "gemini-1.5-pro" or "gemini-1.5-flash"
+export STRATEGIST_MODEL_NAME=gemini-1.5-pro
+export WORKER_MODEL_NAME=gemini-1.5-pro
+export IMPROVER_MODEL_NAME=gemini-1.5-pro
 ```
 If Cerebras SDK is missing, requests return a structured error note rather than crashing.
 
@@ -129,6 +154,12 @@ Run:
 cd IMO25
 pytest -q
 ```
+
+Additional tests cover:
+- Reproducibility with fixed seed
+- Temperature effect on sampling concentration
+- Adaptation increases chosen action probability
+- Early stopping by patience on flat landscapes
 
 ## Limitations and Future Work
 - NRPA search depth and strategy refinement can be further optimized for specific mathematical domains.
@@ -218,9 +249,9 @@ MIT (see headers and LICENSE excerpts in files).
 
 ### NRPA Telemetry
 
-The agent logs NRPA events using the existing telemetry system:
+The agent logs NRPA events using the existing telemetry system with richer payloads:
 - `NRPA_START`: starting search with N candidate strategies and NRPA parameters
-- `NRPA_ITERATION`: selected strategy sequence, viability score, short reason, and policy summary
+- `NRPA_ITERATION`: iteration index, best_score_so_far, last_score, and policy summary including per-step top‑k actions and entropy (first 3 steps)
 - `NRPA_END`: chosen strategy sequence and final policy state
 
 Telemetry is saved as `IMO{N}_telemetry.json` in the `logs` directory with sequential numbering.

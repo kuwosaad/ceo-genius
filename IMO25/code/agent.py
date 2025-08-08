@@ -42,7 +42,9 @@ import argparse
 import time
 import subprocess
 import tempfile
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
+import requests
 
 # NRPA additions and prompt imports
 try:
@@ -67,21 +69,45 @@ except ImportError:
     )
     from telemetry_ext import nrpa_start, nrpa_iteration, nrpa_end
     from nrpa import run_nrpa, NRPA_LEVELS, NRPA_ITER, NRPA_ALPHA, NRPA_MAX_DEPTH
-
-from .config import (
-    STRATEGIST_MODEL_NAME,
-    WORKER_MODEL_NAME,
-    IMPROVER_MODEL_NAME,
-    ENABLE_NRPA,
-)
-from .logging_utils import (
-    log_print,
-    debug_print,
-    initialize_logging,
-    set_log_file,
-    close_log_file,
-    set_verbose_mode,
-)
+# Config and logging imports with fallback
+try:
+    from .config import (
+        STRATEGIST_MODEL_NAME,
+        WORKER_MODEL_NAME,
+        IMPROVER_MODEL_NAME,
+        ENABLE_NRPA,
+        API_URL_BASE,
+        MODEL_PROVIDER,
+        CEREBRAS_MODEL_DEFAULT,
+    )
+    from .logging_utils import (
+        log_print,
+        debug_print,
+        initialize_logging,
+        set_log_file,
+        close_log_file,
+        set_verbose_mode,
+        get_next_log_number,
+    )
+except ImportError:
+    from config import (
+        STRATEGIST_MODEL_NAME,
+        WORKER_MODEL_NAME,
+        IMPROVER_MODEL_NAME,
+        ENABLE_NRPA,
+        API_URL_BASE,
+        MODEL_PROVIDER,
+        CEREBRAS_MODEL_DEFAULT,
+    )
+    from logging_utils import (
+        log_print,
+        debug_print,
+        initialize_logging,
+        set_log_file,
+        close_log_file,
+        set_verbose_mode,
+        get_next_log_number,
+    )
 from .api_utils import (
     get_api_key,
     build_request_payload,
@@ -1220,7 +1246,8 @@ def agent(problem_statement, other_prompts=[]):
       - Emits final solution when stability threshold is met
     """
     # Initialize telemetry system
-    telemetry = TelemetrySystem(_log_directory)
+    # Use default telemetry log directory; logging_utils already manages file outputs
+    telemetry = TelemetrySystem()
     telemetry.start_session()
     
     # Initialize the shared memory scratchpad

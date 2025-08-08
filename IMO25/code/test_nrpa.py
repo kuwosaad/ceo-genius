@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from collections import defaultdict
-from nrpa import code, logsumexp, run_nrpa, PolicyManager, rollout
+from nrpa import code, logsumexp, run_nrpa, PolicyManager, rollout, NRPAConfig
 
 
 def test_code_determinism():
@@ -124,7 +124,8 @@ def test_rollout_terminates():
         return len(seq) / max_depth  # Score based on length
     
     cache = {}
-    score, seq = rollout(policy_manager, initial_candidates, max_depth, mock_children_provider, mock_score_fn, cache)
+    cfg = NRPAConfig(levels=0, iterations=1, alpha=1.0, max_depth=max_depth)
+    score, seq = rollout(policy_manager, initial_candidates, mock_children_provider, mock_score_fn, cache, cfg)
     
     # Sequence should not exceed max_depth
     assert len(seq) <= max_depth
@@ -161,18 +162,107 @@ def test_run_nrpa_improves_over_random():
         return min(1.0, score)
     
     cache = {}
-    
-    # Run NRPA
+    cfg = NRPAConfig(levels=levels, iterations=iterations, alpha=1.0, max_depth=max_depth, temperature=1.0, seed=42)
     best_score, best_seq = run_nrpa(
-        levels=levels,
-        iterations=iterations,
-        alpha=1.0,
+        config=cfg,
         initial_strategies=initial_strategies,
         children_provider=mock_children_provider,
         score_fn=mock_score_fn,
-        cache=cache
+        cache=cache,
     )
     
     # Should find a decent score
     assert best_score > 0.5
     assert len(best_seq) > 0
+
+
+def test_reproducibility_same_seed_same_result():
+    """With fixed seed and deterministic providers, NRPA returns same best_seq across runs."""
+    initial_strategies = ["s1", "s2"]
+    max_depth = 3
+    levels = 1
+    iterations = 8
+
+    def children_provider(step, prefix):
+        if step == 0:
+            return initial_strategies
+        base = len(prefix)
+        return [f"a{base}1", f"a{base}2", f"a{base}3"]
+
+    def score_fn(seq):
+        # deterministic score: prefer specific tokens
+        return sum(1.0 for x in seq if x.endswith("1")) / max_depth
+
+    cfg = NRPAConfig(levels=levels, iterations=iterations, alpha=1.0, max_depth=max_depth, temperature=1.0, seed=123)
+    cache1 = {}
+    cache2 = {}
+    best_score1, best_seq1 = run_nrpa(cfg, initial_strategies, children_provider, score_fn, cache1)
+    best_score2, best_seq2 = run_nrpa(cfg, initial_strategies, children_provider, score_fn, cache2)
+    assert best_seq1 == best_seq2
+
+
+def test_temperature_effect_on_sampling():
+    """Lower temperature should concentrate selections on the max-weight action."""
+    actions = ["a", "b", "c"]
+    pm_cold = PolicyManager(temperature=0.2)
+    pm_hot = PolicyManager(temperature=5.0)
+    # Set weights with a as best
+    pm_cold.policy[code("a")] = 5.0
+    pm_cold.policy[code("b")] = 0.0
+    pm_cold.policy[code("c")] = 0.0
+    # Mirror weights to pm_hot
+    pm_hot.policy.update(pm_cold.policy)
+
+    cold_samples = [pm_cold.softmax_sample(actions) for _ in range(400)]
+    hot_samples = [pm_hot.softmax_sample(actions) for _ in range(400)]
+    assert cold_samples.count("a") > hot_samples.count("a")
+
+
+def test_adapt_increases_sequence_action_probability():
+    """After adapt, probability of chosen actions increases on a controlled legal set."""
+    pm = PolicyManager(temperature=1.0)
+    seq = ["x", "y"]
+
+    def cp(step, prefix):
+        if step == 0:
+            return ["x", "u"]
+        if step == 1:
+            return ["y", "v"]
+        return []
+
+    # Compute initial probabilities
+    def probs(pm, actions):
+        codes = [code(a) for a in actions]
+        weights = [pm.policy.get(c, 0.0) for c in codes]
+        exps = [math.exp(w / pm.temperature) for w in weights]
+        total = sum(exps) or 1.0
+        return {a: exps[i] / total for i, a in enumerate(actions)}
+
+    p0 = probs(pm, ["x", "u"])  # uniform initially
+    pm.adapt(seq, alpha=1.0, children_provider=cp)
+    p1 = probs(pm, ["x", "u"])  # after adapt, x should have higher prob
+    assert p1["x"] > p0["x"]
+
+
+def test_early_stopping_patience_breaks_loop():
+    """With patience=1 on flat scores, loop exits early (few score calls)."""
+    initial_strategies = ["s1", "s2", "s3"]
+    levels = 1
+    iterations = 50
+    max_depth = 2
+
+    calls = {"score": 0}
+
+    def children_provider(step, prefix):
+        if step == 0:
+            return initial_strategies
+        return ["a", "b"]
+
+    def score_fn(seq):
+        calls["score"] += 1
+        return 0.5  # flat
+
+    cfg = NRPAConfig(levels=levels, iterations=iterations, alpha=1.0, max_depth=max_depth, patience=1, temperature=1.0, seed=7)
+    best_score, best_seq = run_nrpa(cfg, initial_strategies, children_provider, score_fn, cache={})
+    # Should not have called score 50 times; typically ~2
+    assert calls["score"] <= 5

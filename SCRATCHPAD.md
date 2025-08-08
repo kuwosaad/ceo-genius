@@ -25,3 +25,8 @@ Fix the core issues in the NRPA system to build a real learning engine with prop
 ## Progress Tracking
 Started: August 6, 2025
 Core issue fixed: State-independent action coding
+
+---
+
+## Assistant Scratchpad Log
+- 2025-08-08: Initialized `.cursor/rules` aligned with `AGENTS.md`. Will track rough work and progress here going forward.

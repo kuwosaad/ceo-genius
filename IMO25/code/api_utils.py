@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from .config import MODEL_PROVIDER, API_URL_BASE, CEREBRAS_MODEL_DEFAULT
+from .config import MODEL_PROVIDER, API_URL_BASE, CEREBRAS_MODEL_DEFAULT, GEMINI_API_URL_BASE
 from .logging_utils import log_print
 
 
@@ -17,6 +17,13 @@ def get_api_key(agent_type: str) -> str:
         api_key = os.getenv("CEREBRAS_API_KEY")
         if not api_key:
             log_print("Error: CEREBRAS_API_KEY environment variable not set for Cerebras provider.")
+            log_print("Please check your .env file or set MODEL_PROVIDER=openrouter.")
+            sys.exit(1)
+        return api_key
+    if MODEL_PROVIDER == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            log_print("Error: GEMINI_API_KEY environment variable not set for Gemini provider.")
             log_print("Please check your .env file or set MODEL_PROVIDER=openrouter.")
             sys.exit(1)
         return api_key
@@ -169,9 +176,85 @@ def send_cerebras_request(api_key: str, payload: Dict[str, Any], model_name: str
         return {"choices": [{"message": {"content": f"Error: Cerebras request failed with exception {e}"}}]}
 
 
+def _convert_to_gemini_request(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert our OpenAI-style messages payload to Gemini's generateContent format.
+    Gemini expects: {
+      "contents": [
+        {"role": "user"|"model", "parts": [{"text": "..."}]} , ...
+      ]
+      , generationConfig: {temperature, topP, maxOutputTokens}
+    }
+    We'll collapse all system prompts and user prompts into a single user turn in order.
+    """
+    messages = payload.get("messages", [])
+    contents = []
+    # Gemini roles: user/model; map system->user, user->user, assistant->model
+    for m in messages:
+        role = m.get("role", "user")
+        text = m.get("content", "")
+        if role not in ("user", "assistant", "system"):
+            role = "user"
+        gem_role = "user" if role in ("user", "system") else "model"
+        contents.append({"role": gem_role, "parts": [{"text": text}]})
+    gen_cfg: Dict[str, Any] = {}
+    if "temperature" in payload:
+        gen_cfg["temperature"] = payload.get("temperature")
+    if "top_p" in payload:
+        gen_cfg["topP"] = payload.get("top_p")
+    if "max_tokens" in payload and payload.get("max_tokens") is not None:
+        gen_cfg["maxOutputTokens"] = payload.get("max_tokens")
+    req: Dict[str, Any] = {"contents": contents}
+    if gen_cfg:
+        req["generationConfig"] = gen_cfg
+    return req
+
+
+def send_gemini_request(api_key: str, payload: Dict[str, Any], model_name: str, agent_type: str = "unknown", telemetry=None) -> Dict[str, Any]:
+    """
+    Send a request to Gemini's REST API using the generateContent endpoint.
+    Endpoint: {GEMINI_API_URL_BASE}/models/{model}:generateContent?key=API_KEY
+    Response format normalized to {"choices": [{"message": {"content": str}}]} for compatibility.
+    """
+    # Build endpoint
+    base = GEMINI_API_URL_BASE.rstrip("/")
+    url = f"{base}/models/{model_name}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    body = _convert_to_gemini_request(payload)
+    try:
+        start = time.time()
+        res = requests.post(url, headers=headers, data=json.dumps(body), timeout=(30, 30))
+        duration = time.time() - start
+        if telemetry:
+            telemetry.record_api_call(duration)
+        res.raise_for_status()
+        data = res.json()
+        # Gemini response: candidates[0].content.parts[].text
+        text = ""
+        try:
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
+                text = "\n".join(t for t in texts if t)
+        except Exception:
+            text = ""
+        return {"choices": [{"message": {"content": text}}]}
+    except requests.exceptions.RequestException as e:
+        log_print(f"[{agent_type.upper()}] Gemini request error: {e}")
+        try:
+            resp_text = res.text  # type: ignore[name-defined]
+            log_print(f"[{agent_type.upper()}] Response text: {resp_text[:500]}")
+        except Exception:
+            pass
+        return {"choices": [{"message": {"content": f"Error: Gemini request failed with exception {e}"}}]}
+
+
 def send_api_request(api_key: str, payload: Dict[str, Any], model_name: str, agent_type: str = "unknown", max_retries: int = 3, telemetry=None) -> Dict[str, Any]:
     if MODEL_PROVIDER == "cerebras":
         return send_cerebras_request(api_key, payload, model_name, agent_type=agent_type, telemetry=telemetry)
+    if MODEL_PROVIDER == "gemini":
+        return send_gemini_request(api_key, payload, model_name, agent_type=agent_type, telemetry=telemetry)
     return send_openrouter_request(api_key, payload, model_name, agent_type=agent_type, max_retries=max_retries, telemetry=telemetry)
 
 
