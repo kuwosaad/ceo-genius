@@ -44,7 +44,6 @@ import subprocess
 import tempfile
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
-import requests
 
 # NRPA additions and prompt imports
 try:
@@ -76,9 +75,6 @@ try:
         WORKER_MODEL_NAME,
         IMPROVER_MODEL_NAME,
         ENABLE_NRPA,
-        API_URL_BASE,
-        MODEL_PROVIDER,
-        CEREBRAS_MODEL_DEFAULT,
     )
     from .logging_utils import (
         log_print,
@@ -95,9 +91,6 @@ except ImportError:
         WORKER_MODEL_NAME,
         IMPROVER_MODEL_NAME,
         ENABLE_NRPA,
-        API_URL_BASE,
-        MODEL_PROVIDER,
-        CEREBRAS_MODEL_DEFAULT,
     )
     from logging_utils import (
         log_print,
@@ -594,53 +587,6 @@ Verification Task Reminder
 Your task is to act as an IMO grader. Now, generate the summary and the step-by-step verification log for the solution above. In your log, justify each correct step and explain in detail any errors or justification gaps you find, as specified in the instructions above.
 """
 
-def get_api_key(agent_type):
-    """
-    Retrieves the appropriate API key from environment variables based on agent type.
-    Exits if the key is not found.
-    """
-    # Provider-specific key
-    if MODEL_PROVIDER == "cerebras":
-        api_key = os.getenv("CEREBRAS_API_KEY")
-        if not api_key:
-            print("Error: CEREBRAS_API_KEY environment variable not set for Cerebras provider.")
-            print("Please check your .env file or set MODEL_PROVIDER=openrouter.")
-            sys.exit(1)
-        return api_key
-
-    # OpenRouter keys by role
-    if agent_type == "strategist":
-        api_key = os.getenv("CEO_API_KEY")
-        if not api_key:
-            print("Error: CEO_API_KEY environment variable not set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-    elif agent_type == "worker":
-        api_key = os.getenv("GENIUS_API_KEY")
-        if not api_key:
-            print("Error: GENIUS_API_KEY environment variable not set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-    elif agent_type == "improver":
-        # Use a separate API key for the improver if available, otherwise fall back to CEO key
-        api_key = os.getenv("IMPROVER_API_KEY")
-        if not api_key:
-            api_key = os.getenv("CEO_API_KEY")
-        if not api_key:
-            print("Error: Neither IMPROVER_API_KEY nor CEO_API_KEY environment variables set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-    else:  # For verifier, use CEO key
-        api_key = os.getenv("CEO_API_KEY")
-        if not api_key:
-            print("Error: CEO_API_KEY environment variable not set.")
-            print("Please check your .env file.")
-            sys.exit(1)
-        return api_key
-
 def read_file_content(filepath):
     """
     Reads and returns the content of a file.
@@ -655,212 +601,6 @@ def read_file_content(filepath):
     except Exception as e:
         print(f"Error reading file '{filepath}': {e}")
         sys.exit(1)
-
-def build_request_payload(system_prompt, question_prompt, other_prompts=None, temperature=0.1, top_p=1.0, max_tokens=None):
-    """
-    Builds the JSON payload for the OpenRouter API request.
-    """
-    # Format messages for OpenRouter
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question_prompt}
-    ]
-    
-    if other_prompts:
-        for prompt in other_prompts:
-            messages.append({"role": "user", "content": prompt})
-
-    payload = {
-        "messages": messages,
-        "temperature": temperature,
-        "top_p": top_p
-    }
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
-
-    return payload
-
-def send_openrouter_request(api_key, payload, model_name, agent_type="unknown", max_retries=3, telemetry=None):
-    """
-    Sends the request to the OpenRouter API and returns the response.
-    Includes retry logic for failed requests.
-    If telemetry is provided, records API call duration metrics.
-    """
-    api_url = API_URL_BASE
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/lyang36/IMO25",  # Optional, for OpenRouter analytics
-        "X-Title": f"IMO25-{agent_type}"  # Optional, for OpenRouter analytics
-    }
-    
-    # Add model to payload
-    payload["model"] = model_name
-    
-    for attempt in range(max_retries):
-        print(f"[{agent_type.upper()}] Sending request to OpenRouter API ({model_name})... (Attempt {attempt + 1}/{max_retries})")
-        try:
-            start = time.time()
-            # Use a shorter timeout of 30 seconds for both connection and read
-            response = requests.post(api_url, headers=headers, data=json.dumps(payload), timeout=(30, 30))
-            duration = time.time() - start
-            if telemetry:
-                telemetry.record_api_call(duration)
-            response.raise_for_status()  # Raises an HTTPError for bad responses (4xx or 5xx)
-            
-            # Log successful response (first 500 characters for debugging)
-            response_text = response.text
-            preview = response_text if len(response_text) <= 500 else response_text[:500] + '... [truncated]'
-            print(f"[{agent_type.upper()}] API request succeeded. Status: {response.status_code}")
-            print(f"[{agent_type.upper()}] Response preview: {preview}")
-            
-            # Try to parse JSON and handle potential errors
-            try:
-                # Check if response is empty
-                if not response_text.strip():
-                    print(f"[{agent_type.upper()}] Warning: Empty response received")
-                    return {"choices": [{"message": {"content": ""}}]}
-                
-                # Try to parse JSON
-                response_json = response.json()
-                return response_json
-            except json.JSONDecodeError as e:
-                print(f"[{agent_type.upper()}] JSON decode error: {e}")
-                print(f"[{agent_type.upper()}] Raw response length: {len(response_text)}")
-                # Try to find valid JSON in the response
-                try:
-                    # Look for JSON-like content in the response
-                    import re
-                    json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                    if json_match:
-                        partial_json = json_match.group(0)
-                        print(f"[{agent_type.upper()}] Found potential JSON fragment, length: {len(partial_json)}")
-                        return json.loads(partial_json)
-                    else:
-                        print(f"[{agent_type.upper()}] No JSON-like content found in response")
-                except json.JSONDecodeError:
-                    print(f"[{agent_type.upper()}] Failed to parse JSON fragment")
-                
-                print(f"[{agent_type.upper()}] Raw response (first 1000 chars): {response_text[:1000]}")
-                # Return a default response structure to prevent crashing
-                return {"choices": [{"message": {"content": "Error: Failed to parse API response"}}]}
-        except requests.exceptions.Timeout:
-            duration = time.time() - start if 'start' in locals() else 0
-            if telemetry:
-                telemetry.record_api_call(duration)
-            print(f"[{agent_type.upper()}] API request timed out (Attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                print(f"[{agent_type.upper()}] Retrying in 2 seconds...")
-                time.sleep(2)
-            else:
-                print(f"[{agent_type.upper()}] All retry attempts failed. API request timed out.")
-                return {"choices": [{"message": {"content": "Error: API request timed out"}}]}
-        except requests.exceptions.RequestException as e:
-            duration = time.time() - start if 'start' in locals() else 0
-            if telemetry:
-                telemetry.record_api_call(duration)
-            print(f"[{agent_type.upper()}] Error during API request: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"[{agent_type.upper()}] Status code: {e.response.status_code}")
-                print(f"[{agent_type.upper()}] Response text: {e.response.text}")
-            
-            if attempt < max_retries - 1:
-                print(f"[{agent_type.upper()}] Retrying in 2 seconds...")
-                time.sleep(2)
-            else:
-                print(f"[{agent_type.upper()}] All retry attempts failed. API request failed.")
-                return {"choices": [{"message": {"content": f"Error: API request failed with exception {e}"}}]}
-
-def send_cerebras_request(api_key, payload, model_name, agent_type="unknown", telemetry=None):
-    """
-    Sends a request using Cerebras SDK.
-    Expects: pip install cerebras-cloud-sdk
-    """
-    start = time.time()
-    try:
-        try:
-            from cerebras.cloud.sdk import Cerebras
-        except Exception as import_err:
-            # Return structured error-like response to reuse parser
-            return {"choices": [{"message": {"content": f"Error: cerebras-cloud-sdk not installed ({import_err})"}}]}
-        client = Cerebras(api_key=api_key)
-        # Convert OpenRouter-like payload into Cerebras chat format
-        messages = payload.get("messages", [])
-        # Cerebras expects: client.chat.completions.create(messages=[...], model=model_name, ...)
-        # Map optional params
-        temperature = payload.get("temperature", 0.1)
-        top_p = payload.get("top_p", 1.0)
-        max_tokens = payload.get("max_tokens", None)
-
-        res = client.chat.completions.create(
-            messages=messages,
-            model=model_name or CEREBRAS_MODEL_DEFAULT,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens
-        )
-        duration = time.time() - start
-        if telemetry:
-            telemetry.record_api_call(duration)
-
-        # Normalize to OpenRouter-like response
-        # Cerebras SDK typically returns an object; extract text similarly
-        try:
-            content = res.choices[0].message.content  # SDK structure
-        except Exception:
-            # Fallback: try dict access
-            content = ""
-            try:
-                content = res["choices"][0]["message"]["content"]
-            except Exception:
-                content = str(res)
-        return {"choices": [{"message": {"content": content}}]}
-    except Exception as e:
-        duration = time.time() - start
-        if telemetry:
-            telemetry.record_api_call(duration)
-        return {"choices": [{"message": {"content": f"Error: Cerebras request failed with exception {e}"}}]}
-
-
-def send_api_request(api_key, payload, model_name, agent_type="unknown", max_retries=3, telemetry=None):
-    """
-    Router that dispatches to OpenRouter or Cerebras based on MODEL_PROVIDER env.
-    """
-    provider = MODEL_PROVIDER
-    if provider == "cerebras":
-        # No retries here; SDK handles errors, and we surface them
-        return send_cerebras_request(api_key, payload, model_name, agent_type=agent_type, telemetry=telemetry)
-    # Default to OpenRouter with retries
-    return send_openrouter_request(api_key, payload, model_name, agent_type=agent_type, max_retries=max_retries, telemetry=telemetry)
-
-
-def extract_text_from_response(response_data):
-    """
-    Extracts the generated text from the API response JSON.
-    Handles potential errors if the response format is unexpected.
-    """
-    try:
-        # For OpenRouter, the response format is different
-        if 'choices' in response_data and len(response_data['choices']) > 0:
-            if 'message' in response_data['choices'][0]:
-                if 'content' in response_data['choices'][0]['message']:
-                    return response_data['choices'][0]['message']['content']
-                else:
-                    print("Warning: 'content' field not found in message")
-                    return ""
-            else:
-                print("Warning: 'message' field not found in choices[0]")
-                return ""
-        else:
-            print("Warning: 'choices' field not found or empty in response")
-            return ""
-    except (KeyError, IndexError, TypeError) as e:
-        print("Error: Could not extract text from the API response.")
-        print(f"Reason: {e}")
-        print("Full API Response:")
-        print(json.dumps(response_data, indent=2))
-        # Return empty string instead of raising exception to prevent crashing
-        return ""
 
 def extract_detailed_solution(solution, marker='Detailed Solution', after=True):
     """
