@@ -11,7 +11,7 @@ This module coordinates a multi-agent system to solve IMO-style problems using L
 
 NRPA Strategy Search (feature-flagged via NRPA_ENABLED=1) sits on top of the Strategist step to enumerate
 multiple strategic candidates, run lightweight simulations (sketches) with the Worker model,
-score their viability using a lightweight verifier, and choose the best path using Nested Rollout 
+score their viability using a lightweight verifier, and choose the best path using Nested Rollout
 Policy Adaptation. Only the selected strategy is then passed to the classic
 Worker → Improver → Verifier pipeline to minimize cost while improving search over strategies.
 
@@ -129,21 +129,21 @@ def execute_python_code(code):
     """
     try:
         # Create a temporary file with the code
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(code)
             temp_file = f.name
-        
+
         # Execute the code in a subprocess with a timeout
         result = subprocess.run(
             [sys.executable, temp_file],
             capture_output=True,
             text=True,
-            timeout=30  # 30 second timeout
+            timeout=30,  # 30 second timeout
         )
-        
+
         # Clean up the temporary file
         os.unlink(temp_file)
-        
+
         # Return the result
         if result.returncode == 0:
             return {"success": True, "output": result.stdout, "error": None}
@@ -153,6 +153,7 @@ def execute_python_code(code):
         return {"success": False, "output": "", "error": "Code execution timed out"}
     except Exception as e:
         return {"success": False, "output": "", "error": str(e)}
+
 
 def initialize_scratchpad(problem_statement):
     """
@@ -180,39 +181,41 @@ def initialize_scratchpad(problem_statement):
 --- END SCRATCHPAD ---"""
     return scratchpad
 
+
 def update_scratchpad(scratchpad, new_fact=None, disproven_hypothesis=None, obstacle=None):
     """
     Update the scratchpad with new information.
     """
-    lines = scratchpad.split('\n')
-    
+    lines = scratchpad.split("\n")
+
     # Find sections
     proven_section = -1
     disproven_section = -1
     obstacle_section = -1
-    
+
     for i, line in enumerate(lines):
-        if line.startswith('**Proven Facts:**'):
+        if line.startswith("**Proven Facts:**"):
             proven_section = i
-        elif line.startswith('**Disproven Hypotheses:**'):
+        elif line.startswith("**Disproven Hypotheses:**"):
             disproven_section = i
-        elif line.startswith('**Current Central Obstacle:**'):
+        elif line.startswith("**Current Central Obstacle:**"):
             obstacle_section = i
-    
+
     # Update sections
     if new_fact and proven_section != -1:
         # Insert after the "Proven Facts:" line
         lines.insert(proven_section + 1, f"- {new_fact}")
-    
+
     if disproven_hypothesis and disproven_section != -1:
         # Insert after the "Disproven Hypotheses:" line
         lines.insert(disproven_section + 1, f"- {disproven_hypothesis}")
-    
+
     if obstacle and obstacle_section != -1:
         # Replace the obstacle line
         lines[obstacle_section] = f"**Current Central Obstacle:** {obstacle}"
-    
-    return '\n'.join(lines)
+
+    return "\n".join(lines)
+
 
 class TelemetrySystem:
     """
@@ -229,6 +232,7 @@ class TelemetrySystem:
     STRATEGY_CHANGE, SOLUTION_FOUND) and also NRPA_* events emitted via telemetry_ext.py.
     At session end, a metrics JSON snapshot is persisted under logs/ with sequential naming.
     """
+
     def __init__(self, log_directory="../logs"):
         self.log_directory = log_directory
         self.metrics = {
@@ -240,86 +244,91 @@ class TelemetrySystem:
             "verification_passes": 0,
             "verification_failures": 0,
             "strategy_changes": 0,
-            "solution_found": False
+            "solution_found": False,
         }
         self.events = []
-    
+
     def start_session(self):
         """Mark the start of a session."""
         self.metrics["start_time"] = datetime.now().isoformat()
         self.log_event("SESSION_START", "Telemetry session started")
-    
+
     def end_session(self):
         """Mark the end of a session."""
         self.metrics["end_time"] = datetime.now().isoformat()
         self.log_event("SESSION_END", "Telemetry session ended")
         self.save_metrics()
-    
+
     def log_event(self, event_type, description):
         """Log a significant event during execution."""
-        self.events.append({
-            "type": event_type,
-            "description": description,
-            "timestamp": datetime.now().isoformat()
-        })
-    
+        self.events.append(
+            {
+                "type": event_type,
+                "description": description,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
     def record_api_call(self, duration):
         """Record an API call with its duration."""
         self.metrics["total_api_calls"] += 1
         self.metrics["api_call_durations"].append(duration)
-    
+
     def record_iteration(self):
         """Record an agent iteration."""
         self.metrics["agent_iterations"] += 1
-    
+
     def record_verification_result(self, passed):
         """Record a verification result."""
         if passed:
             self.metrics["verification_passes"] += 1
         else:
             self.metrics["verification_failures"] += 1
-    
+
     def record_strategy_change(self):
         """Record a strategy change."""
         self.metrics["strategy_changes"] += 1
         self.log_event("STRATEGY_CHANGE", "Agent strategy was reassessed by CEO")
-    
+
     def record_solution_found(self):
         """Record that a solution was found."""
         self.metrics["solution_found"] = True
         self.log_event("SOLUTION_FOUND", "Agent found a correct solution")
-    
+
     def save_metrics(self):
         """Save metrics to a JSON file with sequential naming."""
         # Use the same sequential numbering as the main log
         log_number = get_next_log_number() - 1  # Use the same number as the main log
         metrics_file_path = os.path.join(self.log_directory, f"IMO{log_number}_telemetry.json")
-        
+
         # Calculate additional metrics
         total_duration = 0
         if self.metrics["start_time"] and self.metrics["end_time"]:
             start = datetime.fromisoformat(self.metrics["start_time"])
             end = datetime.fromisoformat(self.metrics["end_time"])
             total_duration = (end - start).total_seconds()
-        
+
         avg_api_duration = 0
         if self.metrics["api_call_durations"]:
-            avg_api_duration = sum(self.metrics["api_call_durations"]) / len(self.metrics["api_call_durations"])
-        
+            avg_api_duration = sum(self.metrics["api_call_durations"]) / len(
+                self.metrics["api_call_durations"]
+            )
+
         # Add calculated metrics
         full_metrics = {
             **self.metrics,
             "total_duration_seconds": total_duration,
             "average_api_call_duration": avg_api_duration,
-            "events": self.events
+            "events": self.events,
         }
-        
+
         try:
-            with open(metrics_file_path, 'w') as f:
+            with open(metrics_file_path, "w") as f:
                 json.dump(full_metrics, f, indent=2)
             print(f"[TELEMETRY] Metrics saved to {metrics_file_path}")
         except Exception as e:
             print(f"[TELEMETRY] Error saving metrics: {e}")
+
 
 class BacktrackingManager:
     """
@@ -331,33 +340,36 @@ class BacktrackingManager:
       from the CEO/Strategist with a failure summary and history for context.
     - Resets when a new strategy is adopted to avoid premature further escalation.
     """
+
     def __init__(self, max_failures=3):
         self.failure_count = 0
         self.max_failures = max_failures
         self.failure_history = []
-    
+
     def record_failure(self, error_type, context, scratchpad_state):
         """
         Record a failure and return whether escalation to CEO is needed.
         """
         self.failure_count += 1
-        self.failure_history.append({
-            "type": error_type,
-            "context": context,
-            "scratchpad_state": scratchpad_state,
-            "timestamp": datetime.now().isoformat()
-        })
+        self.failure_history.append(
+            {
+                "type": error_type,
+                "context": context,
+                "scratchpad_state": scratchpad_state,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
         return self.failure_count >= self.max_failures
-    
+
     def generate_ceo_reassessment_prompt(self, original_strategy, problem_statement):
         """
         Generate a prompt for the CEO to reassess the strategy.
         """
         recent_failures = self.failure_history[-3:]  # Last 3 failures
-        failure_summary = "\n".join([
-            f"- {f['type']}: {f['context'][:100]}..." for f in recent_failures
-        ])
-        
+        failure_summary = "\n".join(
+            [f"- {f['type']}: {f['context'][:100]}..." for f in recent_failures]
+        )
+
         return f"""
 STRATEGIC REASSESSMENT REQUEST
 
@@ -378,6 +390,7 @@ Failure History:
 
 Please provide a new strategic plan that addresses these failures.
 """
+
 
 strategist_system_prompt = """
 You are a world-class mathematician and a brilliant strategist. Your role is to act as the "CEO" or "Strategist" in a two-agent team tasked with solving an International Mathematical Olympiad (IMO) problem.
@@ -594,6 +607,7 @@ Verification Task Reminder
 Your task is to act as an IMO grader. Now, generate the summary and the step-by-step verification log for the solution above. In your log, justify each correct step and explain in detail any errors or justification gaps you find, as specified in the instructions above.
 """
 
+
 def get_api_key(agent_type):
     """
     Retrieves the appropriate API key from environment variables based on agent type.
@@ -641,13 +655,14 @@ def get_api_key(agent_type):
             sys.exit(1)
         return api_key
 
+
 def read_file_content(filepath):
     """
     Reads and returns the content of a file.
     Exits if the file cannot be read.
     """
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
         print(f"Error: File not found at '{filepath}'")
@@ -656,213 +671,31 @@ def read_file_content(filepath):
         print(f"Error reading file '{filepath}': {e}")
         sys.exit(1)
 
-def build_request_payload(system_prompt, question_prompt, other_prompts=None, temperature=0.1, top_p=1.0, max_tokens=None):
+
+def build_request_payload(
+    system_prompt, question_prompt, other_prompts=None, temperature=0.1, top_p=1.0, max_tokens=None
+):
     """
     Builds the JSON payload for the OpenRouter API request.
     """
     # Format messages for OpenRouter
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question_prompt}
+        {"role": "user", "content": question_prompt},
     ]
-    
+
     if other_prompts:
         for prompt in other_prompts:
             messages.append({"role": "user", "content": prompt})
 
-    payload = {
-        "messages": messages,
-        "temperature": temperature,
-        "top_p": top_p
-    }
+    payload = {"messages": messages, "temperature": temperature, "top_p": top_p}
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
 
     return payload
 
-def send_openrouter_request(api_key, payload, model_name, agent_type="unknown", max_retries=3, telemetry=None):
-    """
-    Sends the request to the OpenRouter API and returns the response.
-    Includes retry logic for failed requests.
-    If telemetry is provided, records API call duration metrics.
-    """
-    api_url = API_URL_BASE
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/lyang36/IMO25",  # Optional, for OpenRouter analytics
-        "X-Title": f"IMO25-{agent_type}"  # Optional, for OpenRouter analytics
-    }
-    
-    # Add model to payload
-    payload["model"] = model_name
-    
-    for attempt in range(max_retries):
-        print(f"[{agent_type.upper()}] Sending request to OpenRouter API ({model_name})... (Attempt {attempt + 1}/{max_retries})")
-        try:
-            start = time.time()
-            # Use a shorter timeout of 30 seconds for both connection and read
-            response = requests.post(api_url, headers=headers, data=json.dumps(payload), timeout=(30, 30))
-            duration = time.time() - start
-            if telemetry:
-                telemetry.record_api_call(duration)
-            response.raise_for_status()  # Raises an HTTPError for bad responses (4xx or 5xx)
-            
-            # Log successful response (first 500 characters for debugging)
-            response_text = response.text
-            preview = response_text if len(response_text) <= 500 else response_text[:500] + '... [truncated]'
-            print(f"[{agent_type.upper()}] API request succeeded. Status: {response.status_code}")
-            print(f"[{agent_type.upper()}] Response preview: {preview}")
-            
-            # Try to parse JSON and handle potential errors
-            try:
-                # Check if response is empty
-                if not response_text.strip():
-                    print(f"[{agent_type.upper()}] Warning: Empty response received")
-                    return {"choices": [{"message": {"content": ""}}]}
-                
-                # Try to parse JSON
-                response_json = response.json()
-                return response_json
-            except json.JSONDecodeError as e:
-                print(f"[{agent_type.upper()}] JSON decode error: {e}")
-                print(f"[{agent_type.upper()}] Raw response length: {len(response_text)}")
-                # Try to find valid JSON in the response
-                try:
-                    # Look for JSON-like content in the response
-                    import re
-                    json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                    if json_match:
-                        partial_json = json_match.group(0)
-                        print(f"[{agent_type.upper()}] Found potential JSON fragment, length: {len(partial_json)}")
-                        return json.loads(partial_json)
-                    else:
-                        print(f"[{agent_type.upper()}] No JSON-like content found in response")
-                except json.JSONDecodeError:
-                    print(f"[{agent_type.upper()}] Failed to parse JSON fragment")
-                
-                print(f"[{agent_type.upper()}] Raw response (first 1000 chars): {response_text[:1000]}")
-                # Return a default response structure to prevent crashing
-                return {"choices": [{"message": {"content": "Error: Failed to parse API response"}}]}
-        except requests.exceptions.Timeout:
-            duration = time.time() - start if 'start' in locals() else 0
-            if telemetry:
-                telemetry.record_api_call(duration)
-            print(f"[{agent_type.upper()}] API request timed out (Attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                print(f"[{agent_type.upper()}] Retrying in 2 seconds...")
-                time.sleep(2)
-            else:
-                print(f"[{agent_type.upper()}] All retry attempts failed. API request timed out.")
-                return {"choices": [{"message": {"content": "Error: API request timed out"}}]}
-        except requests.exceptions.RequestException as e:
-            duration = time.time() - start if 'start' in locals() else 0
-            if telemetry:
-                telemetry.record_api_call(duration)
-            print(f"[{agent_type.upper()}] Error during API request: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"[{agent_type.upper()}] Status code: {e.response.status_code}")
-                print(f"[{agent_type.upper()}] Response text: {e.response.text}")
-            
-            if attempt < max_retries - 1:
-                print(f"[{agent_type.upper()}] Retrying in 2 seconds...")
-                time.sleep(2)
-            else:
-                print(f"[{agent_type.upper()}] All retry attempts failed. API request failed.")
-                return {"choices": [{"message": {"content": f"Error: API request failed with exception {e}"}}]}
 
-def send_cerebras_request(api_key, payload, model_name, agent_type="unknown", telemetry=None):
-    """
-    Sends a request using Cerebras SDK.
-    Expects: pip install cerebras-cloud-sdk
-    """
-    start = time.time()
-    try:
-        try:
-            from cerebras.cloud.sdk import Cerebras
-        except Exception as import_err:
-            # Return structured error-like response to reuse parser
-            return {"choices": [{"message": {"content": f"Error: cerebras-cloud-sdk not installed ({import_err})"}}]}
-        client = Cerebras(api_key=api_key)
-        # Convert OpenRouter-like payload into Cerebras chat format
-        messages = payload.get("messages", [])
-        # Cerebras expects: client.chat.completions.create(messages=[...], model=model_name, ...)
-        # Map optional params
-        temperature = payload.get("temperature", 0.1)
-        top_p = payload.get("top_p", 1.0)
-        max_tokens = payload.get("max_tokens", None)
-
-        res = client.chat.completions.create(
-            messages=messages,
-            model=model_name or CEREBRAS_MODEL_DEFAULT,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens
-        )
-        duration = time.time() - start
-        if telemetry:
-            telemetry.record_api_call(duration)
-
-        # Normalize to OpenRouter-like response
-        # Cerebras SDK typically returns an object; extract text similarly
-        try:
-            content = res.choices[0].message.content  # SDK structure
-        except Exception:
-            # Fallback: try dict access
-            content = ""
-            try:
-                content = res["choices"][0]["message"]["content"]
-            except Exception:
-                content = str(res)
-        return {"choices": [{"message": {"content": content}}]}
-    except Exception as e:
-        duration = time.time() - start
-        if telemetry:
-            telemetry.record_api_call(duration)
-        return {"choices": [{"message": {"content": f"Error: Cerebras request failed with exception {e}"}}]}
-
-
-def send_api_request(api_key, payload, model_name, agent_type="unknown", max_retries=3, telemetry=None):
-    """
-    Router that dispatches to OpenRouter or Cerebras based on MODEL_PROVIDER env.
-    """
-    provider = MODEL_PROVIDER
-    if provider == "cerebras":
-        # No retries here; SDK handles errors, and we surface them
-        return send_cerebras_request(api_key, payload, model_name, agent_type=agent_type, telemetry=telemetry)
-    # Default to OpenRouter with retries
-    return send_openrouter_request(api_key, payload, model_name, agent_type=agent_type, max_retries=max_retries, telemetry=telemetry)
-
-
-def extract_text_from_response(response_data):
-    """
-    Extracts the generated text from the API response JSON.
-    Handles potential errors if the response format is unexpected.
-    """
-    try:
-        # For OpenRouter, the response format is different
-        if 'choices' in response_data and len(response_data['choices']) > 0:
-            if 'message' in response_data['choices'][0]:
-                if 'content' in response_data['choices'][0]['message']:
-                    return response_data['choices'][0]['message']['content']
-                else:
-                    print("Warning: 'content' field not found in message")
-                    return ""
-            else:
-                print("Warning: 'message' field not found in choices[0]")
-                return ""
-        else:
-            print("Warning: 'choices' field not found or empty in response")
-            return ""
-    except (KeyError, IndexError, TypeError) as e:
-        print("Error: Could not extract text from the API response.")
-        print(f"Reason: {e}")
-        print("Full API Response:")
-        print(json.dumps(response_data, indent=2))
-        # Return empty string instead of raising exception to prevent crashing
-        return ""
-
-def extract_detailed_solution(solution, marker='Detailed Solution', after=True):
+def extract_detailed_solution(solution, marker="Detailed Solution", after=True):
     """
     Extracts the text after '### Detailed Solution ###' from the solution string.
     Returns the substring after the marker, stripped of leading/trailing whitespace.
@@ -870,11 +703,12 @@ def extract_detailed_solution(solution, marker='Detailed Solution', after=True):
     """
     idx = solution.find(marker)
     if idx == -1:
-        return ''
-    if(after):
-        return solution[idx + len(marker):].strip()
+        return ""
+    if after:
+        return solution[idx + len(marker) :].strip()
     else:
         return solution[:idx].strip()
+
 
 def verify_solution(problem_statement, solution, verbose=True):
     """
@@ -906,43 +740,49 @@ Solution
 
 {verification_remider}
 """
-    if(verbose):
+    if verbose:
         print("[VERIFIER] Start verification.")
-    p2 = build_request_payload(system_prompt=verification_system_prompt,
-                            question_prompt=newst
-                            )
-    
-    if(verbose):
+    p2 = build_request_payload(system_prompt=verification_system_prompt, question_prompt=newst)
+
+    if verbose:
         print("[VERIFIER] Verification prompt:")
         print(json.dumps(p2, indent=4))
-    
-    res = send_api_request(get_api_key("verifier"), p2, model_name=IMPROVER_MODEL_NAME, agent_type="verifier")
-    out = extract_text_from_response(res) 
-    
-    if(verbose):
+
+    res = send_api_request(
+        get_api_key("verifier"), p2, model_name=IMPROVER_MODEL_NAME, agent_type="verifier"
+    )
+    out = extract_text_from_response(res)
+
+    if verbose:
         print("[VERIFIER] Verification results:")
         print(json.dumps(out, indent=4))
-    
-    check_correctness = """Response in "yes" or "no". Is the following statement saying the solution is correct, or does not contain critical error or a major justification gap?""" \
-            + "\n\n" + out 
+
+    check_correctness = (
+        """Response in "yes" or "no". Is the following statement saying the solution is correct, or does not contain critical error or a major justification gap?"""
+        + "\n\n"
+        + out
+    )
     prompt = build_request_payload(system_prompt="", question_prompt=check_correctness)
-    r = send_api_request(get_api_key("verifier"), prompt, model_name=IMPROVER_MODEL_NAME, agent_type="verifier")
-    o = extract_text_from_response(r) 
-    
-    if(verbose):
+    r = send_api_request(
+        get_api_key("verifier"), prompt, model_name=IMPROVER_MODEL_NAME, agent_type="verifier"
+    )
+    o = extract_text_from_response(r)
+
+    if verbose:
         print("[VERIFIER] Is verification good?")
         print(json.dumps(o, indent=4))
-        
+
     bug_report = ""
-    
-    if("yes" not in o.lower()):
+
+    if "yes" not in o.lower():
         bug_report = extract_detailed_solution(out, "Detailed Verification", False)
-    
-    if(verbose):
+
+    if verbose:
         print("[VERIFIER] Bug report:")
         print(json.dumps(bug_report, indent=4))
-    
+
     return bug_report, o
+
 
 def check_if_solution_claimed_complete(solution):
     check_complete_prompt = f"""
@@ -955,12 +795,15 @@ Is the following text claiming that the solution is complete?
 Response in exactly "yes" or "no". No other words.
 """
 
-    p1 = build_request_payload(system_prompt="",    question_prompt=check_complete_prompt)
-    r = send_api_request(get_api_key("improver"), p1, model_name=IMPROVER_MODEL_NAME, agent_type="improver")
+    p1 = build_request_payload(system_prompt="", question_prompt=check_complete_prompt)
+    r = send_api_request(
+        get_api_key("improver"), p1, model_name=IMPROVER_MODEL_NAME, agent_type="improver"
+    )
     o = extract_text_from_response(r)
 
     print(o)
     return "yes" in o.lower()
+
 
 def run_strategic_simulation(path_description: str, problem_statement: str, telemetry=None) -> str:
     """
@@ -978,54 +821,65 @@ def run_strategic_simulation(path_description: str, problem_statement: str, tele
     print(f"[NRPA] Running strategic simulation for path: {path_description}")
     worker_prompt = WORKER_SKETCH_PROMPT.format(
         problem_statement=problem_statement[:4000],  # keep prompt bounded
-        path_description=path_description
+        path_description=path_description,
     )
     payload = build_request_payload(
-        system_prompt="", 
+        system_prompt="",
         question_prompt=worker_prompt,
         temperature=0.2,
         top_p=0.95,
-        max_tokens=800  # sketch-sized
+        max_tokens=800,  # sketch-sized
     )
-    resp = send_api_request(get_api_key("worker"), payload, model_name=WORKER_MODEL_NAME, agent_type="worker", telemetry=telemetry)
+    resp = send_api_request(
+        get_api_key("worker"),
+        payload,
+        model_name=WORKER_MODEL_NAME,
+        agent_type="worker",
+        telemetry=telemetry,
+    )
     sketch_text = extract_text_from_response(resp)
     print(f"[NRPA] DEBUG: Generated sketch (first 500 chars): {sketch_text[:500]}")
     return sketch_text
 
 
-def generate_refinements(path_prefix: List[str], problem_statement: str, cache: Dict[str, Any], telemetry=None) -> List[str]:
+def generate_refinements(
+    path_prefix: List[str], problem_statement: str, cache: Dict[str, Any], telemetry=None
+) -> List[str]:
     """
     Generate refinements for a strategy path prefix using the Strategist model.
-    
+
     Args:
         path_prefix: List of strategy steps so far
         problem_statement: The IMO problem
         cache: Shared cache to avoid duplicate LLM calls
         telemetry: Telemetry system for logging
-        
+
     Returns:
         List of refined strategy steps
     """
     from hashlib import md5
+
     cache_key = md5(f"refine::{'|'.join(path_prefix)}".encode()).hexdigest()
     if cache_key in cache:
         print(f"[NRPA] Using cached refinements for prefix: {' -> '.join(path_prefix[:2])}")
         return cache[cache_key]
-        
+
     prefix_text = " -> ".join(path_prefix) if path_prefix else "(initial strategies)"
     print(f"[NRPA] Generating refinements for prefix: {prefix_text}")
-    
+
     prompt = STRATEGY_REFINEMENT_PROMPT.format(path_prefix=prefix_text)
     payload = build_request_payload(
-        system_prompt="", 
-        question_prompt=prompt,
-        temperature=0.3,
-        top_p=0.9,
-        max_tokens=600
+        system_prompt="", question_prompt=prompt, temperature=0.3, top_p=0.9, max_tokens=600
     )
-    resp = send_api_request(get_api_key("strategist"), payload, model_name=STRATEGIST_MODEL_NAME, agent_type="strategist", telemetry=telemetry)
+    resp = send_api_request(
+        get_api_key("strategist"),
+        payload,
+        model_name=STRATEGIST_MODEL_NAME,
+        agent_type="strategist",
+        telemetry=telemetry,
+    )
     text = extract_text_from_response(resp)
-    
+
     # Parse refinements (expecting JSON array)
     refinements = parse_strategies_list(text)
     # Deduplicate and limit
@@ -1053,9 +907,17 @@ def lightweight_score_sketch(sketch: str, telemetry=None):
     - Adds extra debugging for failed parses to help diagnose model output issues.
     """
     # Use replace instead of format to avoid issues with curly braces in the sketch
-    prompt = LIGHTWEIGHT_VERIFIER_PROMPT.replace('{sketch}', sketch)
-    payload = build_request_payload(system_prompt="", question_prompt=prompt, temperature=0.0, top_p=1.0, max_tokens=200)
-    resp = send_api_request(get_api_key("verifier"), payload, model_name=IMPROVER_MODEL_NAME, agent_type="verifier", telemetry=telemetry)
+    prompt = LIGHTWEIGHT_VERIFIER_PROMPT.replace("{sketch}", sketch)
+    payload = build_request_payload(
+        system_prompt="", question_prompt=prompt, temperature=0.0, top_p=1.0, max_tokens=200
+    )
+    resp = send_api_request(
+        get_api_key("verifier"),
+        payload,
+        model_name=IMPROVER_MODEL_NAME,
+        agent_type="verifier",
+        telemetry=telemetry,
+    )
 
     # Ensure we have text content; if not, default safely
     text = ""
@@ -1066,22 +928,26 @@ def lightweight_score_sketch(sketch: str, telemetry=None):
 
     # Debug: Print the actual response we're trying to parse
     print(f"[NRPA] DEBUG: Verifier response text: {text[:500]}")
-    
+
     # Parse defensively
     score = 0.0
     reason = ""
     parsed_score = None
     parsed_reason = None
-    
+
     try:
         print(f"[NRPA] DEBUG: Attempting to parse viability score from text: {text[:200]}")
         parsed_score, parsed_reason = parse_viability_score(text or "")
-        print(f"[NRPA] DEBUG: parse_viability_score returned: score={parsed_score}, reason={parsed_reason}")
+        print(
+            f"[NRPA] DEBUG: parse_viability_score returned: score={parsed_score}, reason={parsed_reason}"
+        )
         # Normalize parsed values
         try:
             score = float(parsed_score)
         except Exception as e:
-            print(f"[NRPA] DEBUG: Failed to convert parsed_score to float: {parsed_score}, error: {e}")
+            print(
+                f"[NRPA] DEBUG: Failed to convert parsed_score to float: {parsed_score}, error: {e}"
+            )
             score = 0.0
         if score < 0.0 or score > 1.0:
             print(f"[NRPA] DEBUG: Score out of range [0,1]: {score}")
@@ -1118,8 +984,20 @@ def enumerate_initial_strategies(problem_statement: str, other_prompts):
     Ask the Strategist model to enumerate 3–5 high-level strategy candidates.
     """
     enum_prompt = STRATEGIST_ENUM_PROMPT.format(problem_statement=problem_statement)
-    payload = build_request_payload(system_prompt=strategist_system_prompt, question_prompt=enum_prompt, other_prompts=other_prompts, temperature=0.2, top_p=0.9, max_tokens=600)
-    resp = send_api_request(get_api_key("strategist"), payload, model_name=STRATEGIST_MODEL_NAME, agent_type="strategist")
+    payload = build_request_payload(
+        system_prompt=strategist_system_prompt,
+        question_prompt=enum_prompt,
+        other_prompts=other_prompts,
+        temperature=0.2,
+        top_p=0.9,
+        max_tokens=600,
+    )
+    resp = send_api_request(
+        get_api_key("strategist"),
+        payload,
+        model_name=STRATEGIST_MODEL_NAME,
+        agent_type="strategist",
+    )
     text = extract_text_from_response(resp)
     strategies = parse_strategies_list(text)
     print("[NRPA] Initial strategies:")
@@ -1128,7 +1006,9 @@ def enumerate_initial_strategies(problem_statement: str, other_prompts):
     return strategies
 
 
-def init_explorations(problem_statement, verbose=True, other_prompts=[], backtracker=None, telemetry=None):
+def init_explorations(
+    problem_statement, verbose=True, other_prompts=[], backtracker=None, telemetry=None
+):
     """
     Entry-stage orchestration using strategy selector pattern.
 
@@ -1139,10 +1019,10 @@ def init_explorations(problem_statement, verbose=True, other_prompts=[], backtra
 
     # Create API client functions dictionary for strategy selectors
     api_client_funcs = {
-        'build_request_payload': build_request_payload,
-        'send_api_request': send_api_request,
-        'extract_text_from_response': extract_text_from_response,
-        'get_api_key': get_api_key
+        "build_request_payload": build_request_payload,
+        "send_api_request": send_api_request,
+        "extract_text_from_response": extract_text_from_response,
+        "get_api_key": get_api_key,
     }
 
     # Select strategy based on NRPA flag
@@ -1170,20 +1050,24 @@ def init_explorations(problem_statement, verbose=True, other_prompts=[], backtra
     # --- Proceed with original pipeline using the selected strategy ---
     print("[GENIUS] Worker is implementing the plan...")
     worker_question_prompt = worker_prompt_template.format(
-        problem_statement=problem_statement,
-        strategy=strategy,
-        scratchpad=scratchpad
+        problem_statement=problem_statement, strategy=strategy, scratchpad=scratchpad
     )
 
     worker_payload = build_request_payload(
-        system_prompt=step1_prompt, # The original detailed prompt for solution formatting
-        question_prompt=worker_question_prompt
+        system_prompt=step1_prompt,  # The original detailed prompt for solution formatting
+        question_prompt=worker_question_prompt,
     )
 
     print("[GENIUS] Worker prompt:")
     print(json.dumps(worker_payload, indent=4))
 
-    worker_response = send_api_request(get_api_key("worker"), worker_payload, model_name=WORKER_MODEL_NAME, agent_type="worker", telemetry=telemetry)
+    worker_response = send_api_request(
+        get_api_key("worker"),
+        worker_payload,
+        model_name=WORKER_MODEL_NAME,
+        agent_type="worker",
+        telemetry=telemetry,
+    )
     initial_solution = extract_text_from_response(worker_response)
 
     print("[GENIUS] Worker's Initial Solution:")
@@ -1194,31 +1078,37 @@ def init_explorations(problem_statement, verbose=True, other_prompts=[], backtra
 
     # Create a new payload for the conversation history
     conversation_history_payload = {
-        "messages": worker_payload["messages"] + [
+        "messages": worker_payload["messages"]
+        + [
             {"role": "assistant", "content": initial_solution},
-            {"role": "user", "content": self_improvement_prompt.format(scratchpad=scratchpad)}
+            {"role": "user", "content": self_improvement_prompt.format(scratchpad=scratchpad)},
         ],
         "temperature": 0.1,
-        "top_p": 1.0
+        "top_p": 1.0,
     }
 
     # Now call the improver model
-    improver_response = send_api_request(get_api_key("improver"), conversation_history_payload, model_name=IMPROVER_MODEL_NAME, agent_type="improver", telemetry=telemetry)
+    improver_response = send_api_request(
+        get_api_key("improver"),
+        conversation_history_payload,
+        model_name=IMPROVER_MODEL_NAME,
+        agent_type="improver",
+        telemetry=telemetry,
+    )
     solution = extract_text_from_response(improver_response)
     print("[IMPROVER] Self-Improved solution: ")
     print(json.dumps(solution, indent=4))
 
     # Create payload for the correction loop
     correction_payload = {
-        "messages": conversation_history_payload["messages"] + [
-            {"role": "assistant", "content": solution}
-        ],
+        "messages": conversation_history_payload["messages"]
+        + [{"role": "assistant", "content": solution}],
         "temperature": 0.1,
-        "top_p": 1.0
+        "top_p": 1.0,
     }
 
     print("[IMPROVER] Check if solution is complete:")
-    is_complete = check_if_solution_claimed_complete(solution) # Check the improved solution
+    is_complete = check_if_solution_claimed_complete(solution)  # Check the improved solution
     if not is_complete:
         print("[IMPROVER] Solution is not complete. Failed.")
         if telemetry:
@@ -1237,6 +1127,7 @@ def init_explorations(problem_statement, verbose=True, other_prompts=[], backtra
 
     return correction_payload, solution, verify, good_verify, scratchpad, strategy
 
+
 def agent(problem_statement, other_prompts=[]):
     """
     Full outer loop driver that:
@@ -1249,181 +1140,194 @@ def agent(problem_statement, other_prompts=[]):
     # Use default telemetry log directory; logging_utils already manages file outputs
     telemetry = TelemetrySystem()
     telemetry.start_session()
-    
+
     # Initialize the shared memory scratchpad
     scratchpad = initialize_scratchpad(problem_statement)
-    
+
     # Initialize the backtracking manager
     backtracker = BacktrackingManager()
-    
+
     # Get initial explorations
     init_result = init_explorations(problem_statement, True, other_prompts, backtracker, telemetry)
-    
+
     # Handle case where init_explorations returns None (failed to find complete solution)
     if init_result is None or len(init_result) < 6:
         print("[AGENT] Failed in finding a complete solution.")
         telemetry.end_session()
         return None
-    
+
     # Unpack the results
     conversation_history_payload, solution, verify, good_verify, scratchpad, strategy = init_result
-    
+
     if solution is None:
         print("[AGENT] Failed in finding a complete solution.")
         return None
-        
+
     error_count = 0
     correct_count = 0
     if "yes" in good_verify.lower():
         correct_count = 1
-        
+
     for i in range(30):
-        print(f"[AGENT] Number of iterations: {i}, number of corrects: {correct_count}, number of errors: {error_count}")
-        
+        print(
+            f"[AGENT] Number of iterations: {i}, number of corrects: {correct_count}, number of errors: {error_count}"
+        )
+
         if "yes" not in good_verify.lower():
             # Clear counters
             correct_count = 0
             error_count += 1
-            
+
             # Record failure in backtracker
             should_escalate = backtracker.record_failure(
-                "verification_failure", 
-                verify[:200] if verify else "No verification details", 
-                scratchpad
+                "verification_failure",
+                verify[:200] if verify else "No verification details",
+                scratchpad,
             )
-            
+
             # Check if we should escalate to CEO for strategy reassessment
             if should_escalate:
-                print(f"[AGENT] {backtracker.failure_count} failures reached threshold. Escalating to CEO for strategy reassessment.")
-                
+                print(
+                    f"[AGENT] {backtracker.failure_count} failures reached threshold. Escalating to CEO for strategy reassessment."
+                )
+
                 # Generate CEO reassessment prompt
-                ceo_prompt = backtracker.generate_ceo_reassessment_prompt(strategy, problem_statement)
-                
+                ceo_prompt = backtracker.generate_ceo_reassessment_prompt(
+                    strategy, problem_statement
+                )
+
                 # Request new strategy from CEO
                 print("[AGENT] Requesting new strategy from CEO...")
                 strategist_payload = build_request_payload(
-                    system_prompt=strategist_system_prompt,
-                    question_prompt=ceo_prompt
+                    system_prompt=strategist_system_prompt, question_prompt=ceo_prompt
                 )
-                
+
                 strategist_response = send_api_request(
-                    get_api_key("strategist"), 
-                    strategist_payload, 
-                    model_name=STRATEGIST_MODEL_NAME, 
+                    get_api_key("strategist"),
+                    strategist_payload,
+                    model_name=STRATEGIST_MODEL_NAME,
                     agent_type="strategist",
-                    telemetry=telemetry
+                    telemetry=telemetry,
                 )
                 if telemetry:
                     telemetry.record_strategy_change()
-                
+
                 new_strategy = extract_text_from_response(strategist_response)
                 print("[AGENT] New strategy from CEO:")
                 print(new_strategy)
-                
+
                 # Update strategy for next iteration
                 strategy = new_strategy
-                
+
                 # Reset backtracker for new strategy
                 backtracker = BacktrackingManager()
-                
+
                 # Reinitialize with new strategy
                 worker_question_prompt = worker_prompt_template.format(
-                    problem_statement=problem_statement,
-                    strategy=strategy,
-                    scratchpad=scratchpad
+                    problem_statement=problem_statement, strategy=strategy, scratchpad=scratchpad
                 )
-                
+
                 worker_payload = build_request_payload(
-                    system_prompt=step1_prompt,
-                    question_prompt=worker_question_prompt
+                    system_prompt=step1_prompt, question_prompt=worker_question_prompt
                 )
-                
+
                 worker_response = send_api_request(
-                    get_api_key("worker"), 
-                    worker_payload, 
-                    model_name=WORKER_MODEL_NAME, 
+                    get_api_key("worker"),
+                    worker_payload,
+                    model_name=WORKER_MODEL_NAME,
                     agent_type="worker",
-                    telemetry=telemetry
+                    telemetry=telemetry,
                 )
-                
+
                 solution = extract_text_from_response(worker_response)
-                
+
                 # Reset conversation history with new strategy
                 conversation_history_payload = {
-                    "messages": worker_payload["messages"] + [
+                    "messages": worker_payload["messages"]
+                    + [
                         {"role": "assistant", "content": solution},
-                        {"role": "user", "content": self_improvement_prompt.format(scratchpad=scratchpad)}
+                        {
+                            "role": "user",
+                            "content": self_improvement_prompt.format(scratchpad=scratchpad),
+                        },
                     ],
                     "temperature": 0.1,
-                    "top_p": 1.0
+                    "top_p": 1.0,
                 }
-                
+
                 # Get improved solution
                 improver_response = send_api_request(
-                    get_api_key("improver"), 
-                    conversation_history_payload, 
-                    model_name=IMPROVER_MODEL_NAME, 
+                    get_api_key("improver"),
+                    conversation_history_payload,
+                    model_name=IMPROVER_MODEL_NAME,
                     agent_type="improver",
-                    telemetry=telemetry
+                    telemetry=telemetry,
                 )
-                
+
                 solution = extract_text_from_response(improver_response)
-                
+
                 # Reset counters after strategy change
                 error_count = 0
                 correct_count = 0
-                
+
                 # Check if new solution is complete
                 is_complete = check_if_solution_claimed_complete(solution)
                 if not is_complete:
-                    print("[AGENT] New solution from CEO strategy is not complete. Continuing iterations.")
+                    print(
+                        "[AGENT] New solution from CEO strategy is not complete. Continuing iterations."
+                    )
                     continue
             else:
                 # Continue with normal correction process
                 print("[IMPROVER] Verification does not pass, correcting ...")
-                
+
                 # Add correction prompt to the conversation
                 conversation_history_payload["messages"].append(
-                    {"role": "user", "content": correction_prompt.format(scratchpad=scratchpad) + "\n\n" + verify}
+                    {
+                        "role": "user",
+                        "content": correction_prompt.format(scratchpad=scratchpad)
+                        + "\n\n"
+                        + verify,
+                    }
                 )
-                
+
                 print("[IMPROVER] New prompt:")
                 print(json.dumps(conversation_history_payload, indent=4))
                 response2 = send_api_request(
-                    get_api_key("improver"), 
-                    conversation_history_payload, 
-                    model_name=IMPROVER_MODEL_NAME, 
+                    get_api_key("improver"),
+                    conversation_history_payload,
+                    model_name=IMPROVER_MODEL_NAME,
                     agent_type="improver",
-                    telemetry=telemetry
+                    telemetry=telemetry,
                 )
-                
+
                 solution = extract_text_from_response(response2)
-                
+
                 # Add the model's response to the conversation
                 conversation_history_payload["messages"].append(
                     {"role": "assistant", "content": solution}
                 )
-                
+
                 print("[IMPROVER] Corrected solution:")
                 print(json.dumps(solution, indent=4))
-                
+
                 print("[IMPROVER] Check if solution is complete:")
                 is_complete = check_if_solution_claimed_complete(solution)
                 if not is_complete:
                     print("[IMPROVER] Solution is not complete. Continuing iterations.")
                     continue
-                
+
         print("[VERIFIER] Verify the solution.")
         verify, good_verify = verify_solution(problem_statement, solution)
-        
+
         if telemetry:
             telemetry.record_verification_result("yes" in good_verify.lower())
-        
+
         if "yes" in good_verify.lower():
             print("[VERIFIER] Solution is good, verifying again ...")
             correct_count += 1
             error_count = 0
-            
+
         if correct_count >= 5:
             print("[AGENT] Correct solution found.")
             if telemetry:
@@ -1431,17 +1335,18 @@ def agent(problem_statement, other_prompts=[]):
                 telemetry.end_session()
             print(json.dumps(solution, indent=4))
             return solution
-            
+
         elif error_count >= 10:
             print("[AGENT] Failed in finding a correct solution after 10 errors.")
             if telemetry:
                 telemetry.end_session()
             return None
-            
+
     print("[AGENT] Failed in finding a correct solution within 30 iterations.")
     if telemetry:
         telemetry.end_session()
     return None
+
 
 if __name__ == "__main__":
     """
@@ -1462,42 +1367,52 @@ if __name__ == "__main__":
           * NRPA_ENABLED toggles the NRPA-enhanced strategy selection.
     """
     # Set up argument parsing
-    parser = argparse.ArgumentParser(description='IMO Problem Solver Agent')
-    parser.add_argument('problem_file', nargs='?', default='problem_statement.txt',
-                        help='Path to the problem statement file (default: problem_statement.txt)')
-    parser.add_argument('--log', '-l', type=str, help='Path to log file (optional)')
-    parser.add_argument('--other_prompts', '-o', type=str, help='Other prompts (optional)')
-    parser.add_argument("--max_runs", '-m', type=int, default=10, help='Maximum number of runs (default: 10)')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose mode for debugging')
-    
+    parser = argparse.ArgumentParser(description="IMO Problem Solver Agent")
+    parser.add_argument(
+        "problem_file",
+        nargs="?",
+        default="problem_statement.txt",
+        help="Path to the problem statement file (default: problem_statement.txt)",
+    )
+    parser.add_argument("--log", "-l", type=str, help="Path to log file (optional)")
+    parser.add_argument("--other_prompts", "-o", type=str, help="Other prompts (optional)")
+    parser.add_argument(
+        "--max_runs", "-m", type=int, default=10, help="Maximum number of runs (default: 10)"
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable verbose mode for debugging"
+    )
+
     args = parser.parse_args()
-    
+
     # Set verbose mode
     set_verbose_mode(args.verbose)
-    
+
     max_runs = args.max_runs
-    
+
     other_prompts = []
     if args.other_prompts:
-        other_prompts = args.other_prompts.split(',')
-    
+        other_prompts = args.other_prompts.split(",")
+
     print("[MAIN] Other prompts:")
     print(other_prompts)
-    
+
     # Set up logging
     if args.log:
         log_file_path = args.log
     else:
         log_file_path = initialize_logging()
-    
+
     if not set_log_file(log_file_path):
         sys.exit(1)
     print(f"[MAIN] Logging to file: {log_file_path}")
-    
+
     # Handle file path correctly
     if not os.path.isabs(args.problem_file):
         # If relative path, look in the problems directory first
-        problems_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "problems")
+        problems_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "problems"
+        )
         problem_path = os.path.join(problems_dir, args.problem_file)
         if os.path.exists(problem_path):
             problem_statement = read_file_content(problem_path)
@@ -1507,18 +1422,18 @@ if __name__ == "__main__":
     else:
         # Absolute path provided
         problem_statement = read_file_content(args.problem_file)
-    
+
     for i in range(max_runs):
         print(f"\n\n[MAIN] >>>>>>>>>>>>>>>>>>>>>>>>>> Run {i} of {max_runs} ...")
         try:
             sol = agent(problem_statement, other_prompts)
-            if(sol is not None):
+            if sol is not None:
                 print(f"[MAIN] >>>>>>> Found a correct solution in run {i}.")
                 print(json.dumps(sol, indent=4))
                 break
         except Exception as e:
             print(f"[MAIN] >>>>>>> Error in run {i}: {e}")
             continue
-    
+
     # Close log file if it was opened
     close_log_file()
